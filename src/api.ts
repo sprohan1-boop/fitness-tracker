@@ -1,6 +1,6 @@
 // On-device data layer. Everything is stored in this browser's IndexedDB on the phone:
 // no server, works offline. Mirrors the calculations the old FastAPI backend did.
-import type { BackupStatus, DashboardData, Food, Meal, Targets, Workout, WorkoutSet } from "./types";
+import type { BackupStatus, BodyWeight, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 type MealBody = { food_id: number; date: string; meal_type: string; portion_g: number };
@@ -14,11 +14,12 @@ type StoredMeal = Meal & { created_at: number };
 
 type State = {
   version: 1;
-  next_id: { food: number; meal: number; workout: number; set: number };
+  next_id: { food: number; meal: number; workout: number; set: number; weight: number };
   targets: Targets | null;
   foods: Food[];
   meals: StoredMeal[];
   workouts: Workout[];
+  weights: BodyWeight[];
   last_backup_at: number | null;
 };
 
@@ -29,6 +30,7 @@ export type ExportFile = {
   foods: Food[];
   meals: Meal[];
   workouts: Workout[];
+  weights?: BodyWeight[]; // absent in backups made before body weight tracking
 };
 
 const DB_NAME = "fitness-tracker";
@@ -36,13 +38,15 @@ const STORE = "kv";
 const KEY = "state";
 
 function emptyState(): State {
-  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1 }, targets: null, foods: [], meals: [], workouts: [], last_backup_at: null };
+  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], last_backup_at: null };
 }
 
 // Brings data saved by older versions of the app up to the current shape.
 function migrate(state: State): State {
   state.foods = state.foods.map((food) => ({ ...food, servings: food.servings ?? [] }));
   state.last_backup_at ??= null;
+  state.weights ??= [];
+  state.next_id.weight ??= state.weights.reduce((max, entry) => Math.max(max, entry.id), 0) + 1;
   return state;
 }
 
@@ -328,7 +332,7 @@ export const api = {
 
   async backupStatus(): Promise<BackupStatus> {
     const state = await load();
-    return { last_backup_at: state.last_backup_at, has_data: state.foods.length + state.meals.length + state.workouts.length > 0 };
+    return { last_backup_at: state.last_backup_at, has_data: state.foods.length + state.meals.length + state.workouts.length + state.weights.length > 0 };
   },
 
   markBackedUp: () =>
@@ -348,6 +352,114 @@ export const api = {
       return state.targets;
     }),
 
+  // ---------- body weight ----------
+
+  async weights(): Promise<BodyWeight[]> {
+    return [...(await load()).weights].sort((a, b) => a.date.localeCompare(b.date));
+  },
+
+  /** One entry per day: saving again for the same day replaces it. */
+  saveWeight: (date: string, weight_kg: number) =>
+    mutate((state) => {
+      if (!isNum(weight_kg) || weight_kg < 20 || weight_kg > 400) fail("Enter a body weight between 20 and 400 kg.");
+      const value = Math.round(weight_kg * 10) / 10;
+      const existing = state.weights.find((entry) => entry.date === date);
+      if (existing) existing.weight_kg = value;
+      else state.weights.push({ id: state.next_id.weight++, date, weight_kg: value });
+    }),
+
+  deleteWeight: (id: number) =>
+    mutate((state) => {
+      state.weights = state.weights.filter((entry) => entry.id !== id);
+    }),
+
+  // ---------- trends ----------
+
+  /** Daily totals for the `days` days ending on `end`, plus streaks. */
+  async trends(end: string, days: number): Promise<Trends> {
+    const state = await load();
+    const endMs = toUtc(end);
+    const list: TrendDay[] = Array.from({ length: days }, (_, index) => ({
+      date: fromUtc(endMs - (days - 1 - index) * DAY_MS),
+      calories: 0, protein_g: 0, carbohydrates_g: 0, fat_g: 0, fiber_g: 0, workouts: 0, logged: false,
+    }));
+    const byDate = new Map(list.map((day) => [day.date, day]));
+    for (const meal of state.meals) {
+      const day = byDate.get(meal.date);
+      if (!day) continue;
+      day.logged = true;
+      day.calories += meal.calories;
+      day.protein_g += meal.protein_g;
+      day.carbohydrates_g += meal.carbohydrates_g;
+      day.fat_g += meal.fat_g;
+      day.fiber_g += meal.fiber_g;
+    }
+    for (const workout of state.workouts) {
+      const day = byDate.get(workout.date);
+      if (day) day.workouts += 1;
+    }
+
+    // Food streak: consecutive days with a meal, ending today (today may still be empty).
+    const mealDays = new Set(state.meals.map((meal) => meal.date));
+    let cursor = mealDays.has(end) ? endMs : endMs - DAY_MS;
+    let food_streak = 0;
+    while (mealDays.has(fromUtc(cursor))) { food_streak++; cursor -= DAY_MS; }
+
+    // Workout streak in weeks (Mon–Sun) meeting the weekly target; the current week counts once it's met.
+    const target = state.targets?.workouts_per_week ?? 1;
+    const weekCount = new Map<number, number>();
+    const weekStart = (ms: number) => ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY_MS;
+    for (const workout of state.workouts) {
+      const start = weekStart(toUtc(workout.date));
+      weekCount.set(start, (weekCount.get(start) ?? 0) + 1);
+    }
+    let week = weekStart(endMs);
+    if ((weekCount.get(week) ?? 0) < target) week -= 7 * DAY_MS;
+    let workout_week_streak = 0;
+    while ((weekCount.get(week) ?? 0) >= target) { workout_week_streak++; week -= 7 * DAY_MS; }
+
+    return { days: list, targets: state.targets ?? { ...EMPTY_TARGETS }, food_streak, workout_week_streak };
+  },
+
+  // ---------- exercise progress (uses all workouts, not just the recent 50) ----------
+
+  async exercises(): Promise<ExerciseSummary[]> {
+    const summaries = new Map<string, ExerciseSummary>();
+    for (const workout of (await load()).workouts) {
+      const names = new Set(workout.sets.map((set) => set.exercise_name));
+      for (const name of names) {
+        const key = name.toLowerCase();
+        const current = summaries.get(key);
+        if (!current) summaries.set(key, { name, sessions: 1, last_date: workout.date });
+        else {
+          current.sessions++;
+          if (workout.date > current.last_date) current.last_date = workout.date;
+        }
+      }
+    }
+    return [...summaries.values()].sort((a, b) => b.last_date.localeCompare(a.last_date) || b.sessions - a.sessions);
+  },
+
+  /** One point per session (same-day sessions merged), oldest first. */
+  async exerciseProgress(name: string): Promise<ExercisePoint[]> {
+    const key = name.trim().toLowerCase();
+    const byDate = new Map<string, ExercisePoint>();
+    for (const workout of (await load()).workouts) {
+      for (const set of workout.sets) {
+        if (set.exercise_name.toLowerCase() !== key) continue;
+        const point = byDate.get(workout.date) ?? { date: workout.date, top_weight_kg: 0, reps_at_top: 0, volume_kg: 0, sets: 0 };
+        point.sets++;
+        point.volume_kg += set.reps * set.weight_kg;
+        if (set.weight_kg > point.top_weight_kg || (set.weight_kg === point.top_weight_kg && set.reps > point.reps_at_top)) {
+          point.top_weight_kg = set.weight_kg;
+          point.reps_at_top = set.reps;
+        }
+        byDate.set(workout.date, point);
+      }
+    }
+    return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  },
+
   async exportData(): Promise<ExportFile> {
     const state = await load();
     return {
@@ -357,6 +469,7 @@ export const api = {
       foods: state.foods,
       meals: [...state.meals].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id).map(publicMeal),
       workouts: [...state.workouts].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id),
+      weights: [...state.weights].sort((a, b) => a.date.localeCompare(b.date)),
     };
   },
 
@@ -375,12 +488,16 @@ export const api = {
       state.foods = foods;
       state.meals = meals;
       state.workouts = workouts;
+      state.weights = (Array.isArray(data.weights) ? data.weights : []).filter(
+        (entry) => entry && typeof entry.date === "string" && isNum(entry.weight_kg) && isNum(entry.id),
+      );
       state.last_backup_at = Date.now(); // the file just restored from is a backup
       state.next_id = {
         food: maxId(foods.map((food) => food.id)),
         meal: maxId(meals.map((meal) => meal.id)),
         workout: maxId(workouts.map((workout) => workout.id)),
         set: maxId(workouts.flatMap((workout) => workout.sets.map((set) => set.id ?? 0))),
+        weight: maxId(state.weights.map((entry) => entry.id)),
       };
       return { foods: foods.length, meals: meals.length, workouts: workouts.length };
     }),

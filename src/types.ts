@@ -11,6 +11,30 @@ export type Serving = { label: string; grams: number };
 
 export type BackupStatus = { last_backup_at: number | null; has_data: boolean };
 
+export type BodyWeight = { id: number; date: string; weight_kg: number };
+
+export type TrendDay = {
+  date: string;
+  calories: number;
+  protein_g: number;
+  carbohydrates_g: number;
+  fat_g: number;
+  fiber_g: number;
+  workouts: number;
+  logged: boolean; // at least one meal that day
+};
+
+export type Trends = {
+  days: TrendDay[];
+  targets: Targets;
+  food_streak: number; // consecutive days with food logged, up to today
+  workout_week_streak: number; // consecutive weeks meeting the weekly workout target (or 1+ if none set)
+};
+
+export type ExerciseSummary = { name: string; sessions: number; last_date: string };
+
+export type ExercisePoint = { date: string; top_weight_kg: number; reps_at_top: number; volume_kg: number; sets: number };
+
 export type Food = {
   id: number;
   servings: Serving[];

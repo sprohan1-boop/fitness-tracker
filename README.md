@@ -37,9 +37,12 @@ Open `http://localhost:5173`. Production build: `npm run build`. For a sub-path 
 
 ## Features
 
-- Dashboard with daily nutrition totals, optional editable targets, remaining amounts, and weekly activity.
-- Manually managed food library with raw/cooked/packaged distinctions and per-100 g nutrition.
-- Portion-based meal logging with nutrition calculated from the selected food entry and a saved nutrition snapshot.
-- Workout logging with exercises, sets, reps, and metric weights.
-- JSON backup export and restore.
+- Dashboard with daily nutrition totals, optional editable targets, remaining amounts, and weekly activity; switch days to view or log the past.
+- Food library with raw/cooked/packaged distinctions, per-100 g nutrition and saved servings (e.g. "1 bowl" = 80 g).
+- Fast meal logging: search, recent foods, quick portions; meals keep a nutrition snapshot and can be edited later.
+- Workout logging with sets, reps and kg; repeat a past session, "last time" numbers, exercise suggestions, and a rest timer.
+- Progress tab: food and workout streaks, daily averages and target adherence, calories chart, body weight with a 7-day trend, and per-exercise charts (heaviest set, volume).
+- Backups through the iOS share sheet with a 7-day reminder, and restore from a backup file.
 - Installable, offline-capable PWA.
+
+Code: `src/api.ts` (data layer), `src/App.tsx` (main UI), `src/Progress.tsx` (Progress tab), `src/RestTimer.tsx`, `src/utils.ts`.

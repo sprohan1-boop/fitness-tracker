@@ -22,6 +22,7 @@ import {
   Sparkles,
   Target,
   Trash2,
+  TrendingUp,
   Utensils,
   X,
 } from "lucide-react";
@@ -36,9 +37,12 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { api } from "./api";
+import { addDays, dateLabel, formatNumber, localDate } from "./utils";
+import { RestTimer, unlockAudio } from "./RestTimer";
+import { ProgressPage } from "./Progress";
 import type { BackupStatus, DashboardData, Food, Meal, Serving, Targets, Workout } from "./types";
 
-type Page = "dashboard" | "foods" | "workouts" | "settings";
+type Page = "dashboard" | "foods" | "workouts" | "progress" | "settings";
 type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | null;
 type WorkoutBody = { name: string; date: string; sets: { exercise_name: string; set_number: number; reps: number; weight_kg: number }[] };
 
@@ -52,25 +56,6 @@ const EMPTY_TARGETS: Targets = {
   fiber_g: null,
   workouts_per_week: null,
 };
-
-function localDate(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-}
-
-function dateLabel(value: string): string {
-  return new Date(`${value}T12:00:00`).toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function addDays(value: string, days: number): string {
-  const date = new Date(`${value}T12:00:00`);
-  date.setDate(date.getDate() + days);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
 
 /** "Today", "Yesterday", or e.g. "Mon, Nov 10". */
 function dayName(value: string): string {
@@ -114,14 +99,11 @@ async function backupNow(): Promise<boolean> {
   return true;
 }
 
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value);
-}
-
 const navItems: { key: Page; label: string; icon: typeof Home }[] = [
   { key: "dashboard", label: "Overview", icon: Home },
   { key: "foods", label: "Food library", icon: Apple },
   { key: "workouts", label: "Workouts", icon: Dumbbell },
+  { key: "progress", label: "Progress", icon: TrendingUp },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -333,6 +315,8 @@ export default function App() {
                   }
                 }}
               />
+            ) : page === "progress" ? (
+              <ProgressPage onError={setError} />
             ) : (
               <SettingsPage
                 targets={dashboard?.targets ?? EMPTY_TARGETS}
@@ -349,7 +333,7 @@ export default function App() {
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-panel/95 px-2 pb-[max(env(safe-area-inset-bottom),8px)] pt-2 backdrop-blur-xl lg:hidden">
         <div className="mx-auto flex max-w-lg justify-around">
           {navItems.map(({ key, label, icon: Icon }) => (
-            <button key={key} onClick={() => setPage(key)} className={`flex min-w-[68px] flex-col items-center gap-1 rounded-xl px-2 py-1.5 ${page === key ? "text-lime" : "text-muted"}`}>
+            <button key={key} onClick={() => setPage(key)} className={`flex min-w-[60px] flex-col items-center gap-1 rounded-xl px-1.5 py-1.5 ${page === key ? "text-lime" : "text-muted"}`}>
               <Icon size={19} strokeWidth={page === key ? 2.3 : 1.7} />
               <span className="text-[10px] font-medium">{label === "Overview" ? "Home" : label === "Food library" ? "Food" : label}</span>
             </button>
@@ -1035,6 +1019,7 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
   const [name, setName] = useState(initial?.name ?? "");
   const [sets, setSets] = useState<SetDraft[]>(initial ? toDrafts(initial) : [{ exercise_name: "", reps: "", weight_kg: "" }]);
   const [validation, setValidation] = useState("");
+  const [restKick, setRestKick] = useState(0);
 
   // Sessions up to this workout's day (newest first), excluding the one being edited.
   const past = useMemo(
@@ -1084,6 +1069,8 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
     setSets((current) => current.map((set, i) => (i === index ? { ...set, [key]: value } : set)));
   }
   function addSet() {
+    unlockAudio(); // must happen inside the tap for iOS to allow the end-of-rest chime
+    setRestKick((count) => count + 1);
     // Copy the previous set so the next one is usually just one tap away.
     setSets((current) => {
       const last = current[current.length - 1];
@@ -1135,6 +1122,7 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
       </div>
       {(validation || error) && <FormError message={validation || error} />}
       <button disabled={busy} className="button-primary w-full disabled:opacity-60">{busy ? "Saving…" : isEdit ? "Save changes" : "Save workout"}</button>
+      {!isEdit && <RestTimer kick={restKick} />}
     </form>
   );
 }
