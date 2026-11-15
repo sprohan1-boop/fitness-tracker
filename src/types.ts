@@ -7,8 +7,13 @@ export type Targets = {
   workouts_per_week: number | null;
 };
 
+export type Serving = { label: string; grams: number };
+
+export type BackupStatus = { last_backup_at: number | null; has_data: boolean };
+
 export type Food = {
   id: number;
+  servings: Serving[];
   name: string;
   brand: string | null;
   preparation: "raw" | "cooked" | "packaged" | "unspecified";

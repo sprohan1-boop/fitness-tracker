@@ -1,6 +1,6 @@
 // On-device data layer. Everything is stored in this browser's IndexedDB on the phone:
 // no server, works offline. Mirrors the calculations the old FastAPI backend did.
-import type { DashboardData, Food, Meal, Targets, Workout, WorkoutSet } from "./types";
+import type { BackupStatus, DashboardData, Food, Meal, Targets, Workout, WorkoutSet } from "./types";
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 type MealBody = { food_id: number; date: string; meal_type: string; portion_g: number };
@@ -19,6 +19,7 @@ type State = {
   foods: Food[];
   meals: StoredMeal[];
   workouts: Workout[];
+  last_backup_at: number | null;
 };
 
 export type ExportFile = {
@@ -35,7 +36,14 @@ const STORE = "kv";
 const KEY = "state";
 
 function emptyState(): State {
-  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1 }, targets: null, foods: [], meals: [], workouts: [] };
+  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1 }, targets: null, foods: [], meals: [], workouts: [], last_backup_at: null };
+}
+
+// Brings data saved by older versions of the app up to the current shape.
+function migrate(state: State): State {
+  state.foods = state.foods.map((food) => ({ ...food, servings: food.servings ?? [] }));
+  state.last_backup_at ??= null;
+  return state;
 }
 
 // ---------- IndexedDB persistence (whole state saved as one record) ----------
@@ -55,7 +63,7 @@ async function readState(): Promise<State> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const request = db.transaction(STORE, "readonly").objectStore(STORE).get(KEY);
-    request.onsuccess = () => resolve((request.result as State | undefined) ?? emptyState());
+    request.onsuccess = () => resolve(migrate((request.result as State | undefined) ?? emptyState()));
     request.onerror = () => reject(new Error("Could not read your saved data."));
   });
 }
@@ -107,7 +115,28 @@ function cleanFood(body: FoodBody): FoodBody {
   if (!PREPARATIONS.includes(body.preparation)) fail("Choose a preparation state.");
   const values = [body.calories_per_100g, body.protein_g_per_100g, body.carbohydrates_g_per_100g, body.fat_g_per_100g, body.fiber_g_per_100g];
   if (!values.every((value) => isNum(value) && value >= 0)) fail("Nutrition values must be non-negative numbers.");
-  return { ...body, name, brand: body.brand?.trim() || null, notes: body.notes?.trim() || null };
+  const servings = (body.servings ?? []).map((serving) => {
+    const label = String(serving.label ?? "").trim();
+    if (!label || label.length > 40) fail("Each serving needs a name of up to 40 characters.");
+    if (!isNum(serving.grams) || serving.grams <= 0 || serving.grams > 10000) fail("Serving sizes must be between 0 and 10,000 g.");
+    return { label, grams: serving.grams };
+  });
+  if (servings.length > 10) fail("Add up to 10 servings per food.");
+  return { ...body, name, brand: body.brand?.trim() || null, notes: body.notes?.trim() || null, servings };
+}
+
+function cleanWorkout(body: WorkoutBody, nextSetId: () => number): Omit<Workout, "id"> {
+  const name = body.name.trim();
+  if (!name || name.length > 120) fail("Workout name must be 1–120 characters.");
+  if (body.sets.length < 1 || body.sets.length > 200) fail("Add between 1 and 200 sets.");
+  const sets: WorkoutSet[] = body.sets.map((set) => {
+    const exercise_name = set.exercise_name.trim();
+    if (!exercise_name) fail("Exercise name cannot be blank.");
+    if (!Number.isInteger(set.reps) || set.reps < 1 || set.reps > 1000) fail("Reps must be a whole number from 1 to 1000.");
+    if (!isNum(set.weight_kg) || set.weight_kg < 0 || set.weight_kg > 10000) fail("Weight must be 0–10,000 kg.");
+    return { id: nextSetId(), exercise_name, set_number: set.set_number, reps: set.reps, weight_kg: set.weight_kg };
+  });
+  return { name, date: body.date, notes: body.notes?.trim() || null, sets };
 }
 
 function cleanTargets(body: Targets): Targets {
@@ -259,19 +288,52 @@ export const api = {
 
   createWorkout: (body: WorkoutBody) =>
     mutate((state) => {
-      const name = body.name.trim();
-      if (!name || name.length > 120) fail("Workout name must be 1–120 characters.");
-      if (body.sets.length < 1 || body.sets.length > 200) fail("Add between 1 and 200 sets.");
-      const sets: WorkoutSet[] = body.sets.map((set) => {
-        const exercise_name = set.exercise_name.trim();
-        if (!exercise_name) fail("Exercise name cannot be blank.");
-        if (!Number.isInteger(set.reps) || set.reps < 1 || set.reps > 1000) fail("Reps must be a whole number from 1 to 1000.");
-        if (!isNum(set.weight_kg) || set.weight_kg < 0 || set.weight_kg > 10000) fail("Weight must be 0–10,000 kg.");
-        return { id: state.next_id.set++, exercise_name, set_number: set.set_number, reps: set.reps, weight_kg: set.weight_kg };
-      });
-      const workout: Workout = { id: state.next_id.workout++, name, date: body.date, notes: body.notes?.trim() || null, sets };
+      const workout: Workout = { ...cleanWorkout(body, () => state.next_id.set++), id: state.next_id.workout++ };
       state.workouts.push(workout);
       return workout;
+    }),
+
+  updateWorkout: (id: number, body: WorkoutBody) =>
+    mutate((state) => {
+      const index = state.workouts.findIndex((workout) => workout.id === id);
+      if (index < 0) fail("Workout not found.");
+      state.workouts[index] = { ...cleanWorkout(body, () => state.next_id.set++), id };
+      return state.workouts[index];
+    }),
+
+  /** Change portion, meal or day. Nutrition is rescaled from the saved snapshot, not the current food values. */
+  updateMeal: (id: number, body: { date: string; meal_type: string; portion_g: number }) =>
+    mutate((state) => {
+      const meal = state.meals.find((item) => item.id === id) ?? fail("Meal log not found.");
+      if (!MEAL_TYPES.includes(body.meal_type)) fail("Choose a meal type.");
+      if (!isNum(body.portion_g) || body.portion_g <= 0 || body.portion_g > 10000) fail("Enter a portion between 0 and 10,000 g.");
+      const ratio = body.portion_g / meal.portion_g;
+      for (const key of ["calories", "protein_g", "carbohydrates_g", "fat_g", "fiber_g"] as const) meal[key] *= ratio;
+      meal.portion_g = body.portion_g;
+      meal.meal_type = body.meal_type;
+      meal.date = body.date;
+      return publicMeal(meal);
+    }),
+
+  /** Food ids most recently logged, newest first. */
+  async recentFoodIds(limit = 6): Promise<number[]> {
+    const state = await load();
+    const ids: number[] = [];
+    for (const meal of [...state.meals].sort((a, b) => b.created_at - a.created_at)) {
+      if (!ids.includes(meal.food_id) && state.foods.some((food) => food.id === meal.food_id)) ids.push(meal.food_id);
+      if (ids.length >= limit) break;
+    }
+    return ids;
+  },
+
+  async backupStatus(): Promise<BackupStatus> {
+    const state = await load();
+    return { last_backup_at: state.last_backup_at, has_data: state.foods.length + state.meals.length + state.workouts.length > 0 };
+  },
+
+  markBackedUp: () =>
+    mutate((state) => {
+      state.last_backup_at = Date.now();
     }),
 
   deleteWorkout: (id: number) =>
@@ -313,6 +375,7 @@ export const api = {
       state.foods = foods;
       state.meals = meals;
       state.workouts = workouts;
+      state.last_backup_at = Date.now(); // the file just restored from is a backup
       state.next_id = {
         food: maxId(foods.map((food) => food.id)),
         meal: maxId(meals.map((meal) => meal.id)),
