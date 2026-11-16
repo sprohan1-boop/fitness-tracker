@@ -3,6 +3,7 @@
 import { libraryWords, searchFoodDb } from "./foodDb";
 import type { DbFood } from "./foodDb";
 import type { Food, Serving } from "./types";
+import { normalizeServing } from "./utils";
 
 /** What a line is matched to: one of your foods, a database food, or an AI estimate. */
 export type Choice =
@@ -18,6 +19,8 @@ export type QuickLine = {
   alternatives: Choice[];
   grams: string; // editable amount in grams, "" when unknown
   estimatedAmount: boolean; // amount guessed from a household measure
+  note: string; // e.g. "Weight includes bone: counted 70% as meat."
+  partial: string | null; // the dish words a near-match leaves out ("curry"); such lines start unmatched
 };
 
 const NUMBER_WORDS: Record<string, number> = {
@@ -63,10 +66,25 @@ function parseNumber(token: string): number | null {
 }
 
 /** "2 roti", "1/2 cup rice", "200g chicken", "half a banana", "roti x2" -> quantity, unit, food words. */
-export function parseItem(text: string): { qty: number; unit: string | null; foodText: string } {
+export function parseItem(text: string): { qty: number; unit: string | null; foodText: string; withBone: boolean } {
   let rest = text.toLowerCase().replace(/(\d)(g|gm|gms|kg|ml|l)\b/g, "$1 $2").replace(/\s+/g, " ").trim();
   let qty: number | null = null;
   let unit: string | null = null;
+
+  // "with bone", "bone-in", "on the bone": the weight includes bone.
+  const bone = /\b(with (the )?bones?|bone[- ]?in|on the bone)\b/;
+  const withBone = bone.test(rest);
+  rest = rest.replace(bone, " ").replace(/\s+/g, " ").trim();
+
+  // A weight or volume anywhere: "chicken curry 200 g", "rice 1.5 kg".
+  const weight = rest.match(/(?:^|\s)(\d+(?:\.\d+)?)\s+(g|gm|gms|grams?|kg|kgs|ml|l|litres?|liters?)(?=\s|$)/);
+  if (weight) {
+    qty = Number(weight[1]);
+    unit = UNITS[weight[2]];
+    rest = `${rest.slice(0, weight.index)} ${rest.slice((weight.index ?? 0) + weight[0].length)}`.replace(/\s+/g, " ").trim();
+    while (rest.startsWith("of ")) rest = rest.slice(3);
+    return { qty, unit, foodText: rest, withBone };
+  }
 
   // Trailing "x2" / "*2" / "2x"
   const trailing = rest.match(/\s*(?:x|\*)\s*(\d+(?:\.\d+)?)$/) ?? rest.match(/\s+(\d+(?:\.\d+)?)\s*x$/);
@@ -88,14 +106,15 @@ export function parseItem(text: string): { qty: number; unit: string | null; foo
     unit = UNITS[tokens.shift() as string];
     if (tokens[0] === "of") tokens.shift();
   }
-  return { qty: qty ?? 1, unit, foodText: tokens.join(" ").trim() };
+  return { qty: qty ?? 1, unit, foodText: tokens.join(" ").trim(), withBone };
 }
 
 function nameOf(choice: Choice): string {
   return choice.kind === "library" ? choice.food.name : choice.kind === "db" ? choice.item.name : choice.name;
 }
 function servingsOf(choice: Choice): Serving[] {
-  return choice.kind === "library" ? choice.food.servings : choice.kind === "db" ? choice.item.portions : [{ label: "1 portion", grams: choice.grams }];
+  const raw = choice.kind === "library" ? choice.food.servings : choice.kind === "db" ? choice.item.portions : [{ label: "1 portion", grams: choice.grams }];
+  return raw.map(normalizeServing);
 }
 
 /** Grams for a quantity + unit of a chosen food. */
@@ -106,17 +125,10 @@ export function gramsFor(choice: Choice, qty: number, unit: string | null): { gr
   const servings = servingsOf(choice);
   if (unit && UNIT_MATCH[unit]) {
     const portion = servings.find((serving) => UNIT_MATCH[unit].test(serving.label.toLowerCase()));
-    if (portion) {
-      // "1 cup" portions are per 1 unit; labels like "0.5 breast" scale per their own amount.
-      const per = Number(portion.label.match(/^(\d+(?:\.\d+)?)/)?.[1] ?? 1) || 1;
-      return { grams: Math.round((qty * portion.grams) / per), estimated: false };
-    }
+    if (portion) return { grams: Math.round(qty * portion.grams), estimated: false };
   }
   if (unit && HOUSEHOLD_GRAMS[unit]) return { grams: Math.round(qty * HOUSEHOLD_GRAMS[unit]), estimated: true };
-  if (servings[0]) {
-    const per = Number(servings[0].label.match(/^(\d+(?:\.\d+)?)/)?.[1] ?? 1) || 1;
-    return { grams: Math.round((qty * servings[0].grams) / per), estimated: unit !== null };
-  }
+  if (servings[0]) return { grams: Math.round(qty * servings[0].grams), estimated: unit !== null };
   return { grams: Math.round(qty * 100), estimated: true };
 }
 
@@ -137,6 +149,15 @@ function matchLibrary(foods: Food[], foodText: string): Food[] {
 const FILLER = new Set(["with", "without", "less", "no", "extra", "some", "little", "bit", "of", "the", "my", "homemade", "home", "made", "fresh", "hot", "cold", "plain"]);
 const mainWords = (text: string) => text.split(/\s+/).filter((word) => word && !FILLER.has(word)).join(" ");
 
+// Words that name the dish: a match that leaves one out is a different food ("chicken" isn't "chicken curry").
+const DISH_WORDS = new Set([
+  "curry", "masala", "biryani", "biriyani", "pulao", "pulav", "korma", "tikka", "makhani", "gravy", "sabzi", "sabji", "subzi", "kofta",
+  "paratha", "parantha", "dosa", "idli", "sambar", "rasam", "kheer", "halwa", "pakora", "pakoda", "samosa", "chaat", "fry", "fried",
+  "butter", "tandoori", "kebab", "kabab", "keema", "soup", "salad", "sandwich", "pizza", "burger", "pasta", "noodles", "roll", "wrap",
+  "cake", "shake", "smoothie", "juice", "lassi", "raita", "manchurian", "chilli", "chili", "bhaji", "bhurji", "upma", "poha", "khichdi",
+  "dal", "daal", "chole", "rajma", "paneer", "kadhi", "pav", "vada", "uttapam", "momos", "omelette", "omelet", "fritter", "stew",
+]);
+
 /** "chai with less sugar" -> tries the whole phrase, then "chai with less", "chai with", "chai". */
 function shorterPhrases(foodText: string): string[] {
   const parts = foodText.split(/\s+/).filter(Boolean);
@@ -146,25 +167,46 @@ function shorterPhrases(foodText: string): string[] {
 /** Parses free text into lines with a best match, alternatives and grams. */
 export function quickLog(input: string, library: Food[], db: DbFood[] | null): QuickLine[] {
   return splitItems(input).map((text) => {
-    const { qty, unit, foodText } = parseItem(text);
+    const { qty, unit, foodText, withBone } = parseItem(text);
+    const words = mainWords(foodText) || foodText;
+    const phrases = shorterPhrases(words);
+    const allWords = words.split(/\s+/);
+    // Dish words a shorter phrase would leave out.
+    const missing = (phrase: string) => allWords.slice(phrase.split(/\s+/).length).filter((word) => DISH_WORDS.has(word));
     // Your own foods are tried on every shorter phrase first, then the database.
-    const phrases = shorterPhrases(mainWords(foodText) || foodText);
     let own: Choice[] = [];
+    let ownPhrase = "";
     for (const phrase of phrases) {
       own = matchLibrary(library, phrase).slice(0, 3).map((food) => ({ kind: "library" as const, food }));
-      if (own.length) break;
+      if (own.length) { ownPhrase = phrase; break; }
     }
     let fromDb: Choice[] = [];
+    let dbPhrase = "";
     for (const phrase of phrases) {
       fromDb = db ? searchFoodDb(db, phrase, 5).map((item) => ({ kind: "db" as const, item })) : [];
-      if (fromDb.length) break;
+      if (fromDb.length) { dbPhrase = phrase; break; }
     }
     // Skip database entries you already have in your library.
     const ownNames = new Set(own.map((choice) => nameOf(choice).toLowerCase()));
     const alternatives = [...own, ...fromDb.filter((choice) => !ownNames.has(nameOf(choice).toLowerCase()))];
-    const choice = alternatives[0] ?? null;
+    const bestPhrase = own.length ? ownPhrase : dbPhrase;
+    const dropped = alternatives.length ? missing(bestPhrase) : [];
+    // A near-match that drops the dish ("chicken" for "chicken curry") isn't picked automatically.
+    const choice = dropped.length ? null : alternatives[0] ?? null;
     const amount = choice ? gramsFor(choice, qty, unit) : { grams: null, estimated: false };
-    return { text, qty, unit, choice, alternatives, grams: amount.grams === null ? "" : String(amount.grams), estimatedAmount: amount.estimated };
+    let grams = amount.grams;
+    let note = "";
+    if (grams !== null && withBone && choice?.kind !== "ai") {
+      grams = Math.round(grams * 0.7);
+      note = "Weight includes bone: counted 70% as meat.";
+    }
+    return {
+      text, qty, unit, choice, alternatives,
+      grams: grams === null ? "" : String(grams),
+      estimatedAmount: amount.estimated || withBone,
+      note,
+      partial: dropped.length ? dropped.join(" ") : null,
+    };
   });
 }
 

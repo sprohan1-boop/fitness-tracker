@@ -1,6 +1,7 @@
 // Built-in generic food database: USDA FoodData Central, SR Legacy (public domain), built into
 // public/foods-db.json. Downloaded on first search, then cached for offline use.
 import type { Food, Serving } from "./types";
+import { normalizeServing } from "./utils";
 
 export type DbFood = {
   name: string;
@@ -38,7 +39,7 @@ export function loadFoodDb(): Promise<DbFood[]> {
     .then((raw) =>
       raw.foods.map(([name, cat, kcal, protein, carbs, fat, fiber, sugar, satFat, sodiumMg, portions]) => ({
         name, category: raw.categories[cat] ?? "", kcal, protein, carbs, fat, fiber, sugar, satFat, sodiumMg,
-        portions: portions.map(([label, grams]) => ({ label, grams })).sort((a, b) => portionRank(a.label) - portionRank(b.label)),
+        portions: portions.map(([label, grams]) => normalizeServing({ label, grams })).sort((a, b) => portionRank(a.label) - portionRank(b.label)),
       })),
     )
     .catch((cause) => {

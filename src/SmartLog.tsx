@@ -6,7 +6,7 @@ import { estimateMealFromPhoto, estimateMealFromText, friendlyError, photoToJpeg
 import type { AiFoodItem } from "./ai";
 import { loadFoodDb } from "./foodDb";
 import type { DbFood } from "./foodDb";
-import { choiceName, choiceServings, gramsFor, nutritionFor, quickLog } from "./quickLog";
+import { choiceName, choiceServings, gramsFor, nutritionFor, parseItem, quickLog } from "./quickLog";
 import type { Choice, QuickLine } from "./quickLog";
 import type { Food } from "./types";
 import { AmountInput, FormError } from "./ui";
@@ -19,7 +19,7 @@ const MEAL_TYPES = ["breakfast", "lunch", "dinner", "snack"];
 function aiChoice(item: AiFoodItem): Choice {
   return { kind: "ai", name: item.name, grams: item.grams, kcal: item.kcal, protein: item.protein_g, carbs: item.carbs_g, fat: item.fat_g, fiber: item.fiber_g, note: item.note, confidence: item.confidence };
 }
-const aiLine = (item: AiFoodItem, text: string): QuickLine => ({ text, qty: 1, unit: null, choice: aiChoice(item), alternatives: [], grams: String(Math.round(item.grams)), estimatedAmount: false });
+const aiLine = (item: AiFoodItem, text: string): QuickLine => ({ text, qty: 1, unit: null, choice: aiChoice(item), alternatives: [], grams: String(Math.round(item.grams)), estimatedAmount: false, note: "", partial: null });
 
 function sourceLabel(choice: Choice) {
   if (choice.kind === "library") return { text: "Your food", tone: "text-lime" };
@@ -75,7 +75,9 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
   function pick(index: number, choice: Choice) {
     const line = lines[index];
     const amount = gramsFor(choice, line.qty, line.unit);
-    update(index, { choice, grams: amount.grams === null ? "" : String(amount.grams), estimatedAmount: amount.estimated });
+    const withBone = parseItem(line.text).withBone && choice.kind !== "ai";
+    const grams = amount.grams === null ? null : withBone ? Math.round(amount.grams * 0.7) : amount.grams;
+    update(index, { choice, grams: grams === null ? "" : String(grams), estimatedAmount: amount.estimated || withBone, partial: null, note: withBone ? "Weight includes bone: counted 70% as meat." : "" });
     setOpenPicker(null);
   }
 
@@ -158,16 +160,29 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
                 </div>
               )}
               <div className="mt-2">
-                <AmountInput key={choiceName(line.choice)} grams={line.grams} servings={choiceServings(line.choice)} onChange={(grams) => update(index, { grams, estimatedAmount: false })} label={`Amount of ${choiceName(line.choice)}`} />
+                <AmountInput key={choiceName(line.choice)} grams={line.grams} servings={choiceServings(line.choice)} onChange={(grams) => update(index, { grams, estimatedAmount: false })} label={`Amount of ${choiceName(line.choice)}`} preferGrams={["g", "kg", "ml", "l"].includes(line.unit ?? "") || line.note !== ""} />
               </div>
               <p className="mt-1.5 flex flex-wrap justify-between gap-x-2 text-[11px] text-muted">
                 {Number(line.grams) > 0 && (() => { const n = nutritionFor(line.choice!, Number(line.grams)); return <span><b className="text-white">{formatNumber(Math.round(n.kcal))} kcal</b> · {formatNumber(n.protein)} g protein</span>; })()}
                 {line.estimatedAmount && <span className="text-amber-300">Amount guessed, please check</span>}
               </p>
               {line.choice.kind === "ai" && line.choice.note && <p className="mt-1 text-[10px] leading-4 text-muted">{line.choice.note}</p>}
+              {line.note && <p className="mt-1 text-[10px] leading-4 text-muted">{line.note}</p>}
             </>
           ) : (
-            <p className="mt-1 text-xs text-amber-300">Not found in your foods or the database.</p>
+            <>
+              <p className="mt-1 text-xs text-amber-300">{line.partial ? `No exact match: nothing found with "${line.partial}".` : "Not found in your foods or the database."}</p>
+              {line.alternatives.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  <p className="text-[10px] text-muted">Near matches{line.partial ? ` (without "${line.partial}")` : ""}:</p>
+                  {line.alternatives.slice(0, 3).map((alternative) => (
+                    <button key={choiceName(alternative)} type="button" onClick={() => pick(index, alternative)} className="block w-full rounded-lg border border-line/70 px-2.5 py-2 text-left text-[12px] leading-4">
+                      {choiceName(alternative)} <span className={`text-[10px] ${sourceLabel(alternative).tone}`}>· {sourceLabel(alternative).text}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       ))}

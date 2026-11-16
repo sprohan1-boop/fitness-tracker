@@ -43,3 +43,12 @@ export function formatHours(hours: number): string {
   if (minutes === 60) return `${whole + 1}h`;
   return minutes ? `${whole}h ${minutes}m` : `${whole}h`;
 }
+
+/** "0.5 breast" (86 g) -> "1 breast" (172 g): portions in whole units read better as "2 × breast". */
+export function normalizeServing<T extends { label: string; grams: number }>(serving: T): T {
+  const match = serving.label.match(/^(\d+(?:\.\d+)?|\d+\/\d+)\s+(.*)$/);
+  if (!match) return serving;
+  const amount = match[1].includes("/") ? Number(match[1].split("/")[0]) / Number(match[1].split("/")[1]) : Number(match[1]);
+  if (!amount || amount === 1) return serving;
+  return { ...serving, label: `1 ${match[2]}`.slice(0, 40), grams: Math.round((serving.grams / amount) * 10) / 10 };
+}

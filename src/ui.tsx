@@ -3,7 +3,7 @@ import { Minus, Plus, X } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import type { Serving } from "./types";
-import { formatNumber } from "./utils";
+import { formatNumber, normalizeServing } from "./utils";
 
 export function ModalShell({ title, eyebrow, onClose, children }: { title: string; eyebrow: string; onClose: () => void; children: ReactNode }) {
   return (
@@ -35,11 +35,12 @@ export function FormError({ message }: { message: string }) {
  * An amount as "quantity × unit", where the unit is grams or one of the food's servings
  * (e.g. 2 × "1 biscuit (8.5 g)"). Always reports grams to the parent.
  */
-export function AmountInput({ grams, servings, onChange, label = "Amount" }: { grams: string; servings: Serving[]; onChange: (grams: string) => void; label?: string }) {
+export function AmountInput({ grams, servings: rawServings, onChange, label = "Amount", preferGrams = false }: { grams: string; servings: Serving[]; onChange: (grams: string) => void; label?: string; preferGrams?: boolean }) {
+  const servings = rawServings.map(normalizeServing);
   // Start on a serving when the grams are a whole or half number of it (e.g. 17 g = 2 biscuits).
   const initial = (() => {
     const g = Number(grams);
-    if (g > 0) {
+    if (g > 0 && !preferGrams) { // a typed weight ("200g") stays in grams
       for (let i = 0; i < servings.length; i++) {
         const ratio = g / servings[i].grams;
         if (Math.abs(ratio * 2 - Math.round(ratio * 2)) < 0.01) return { unit: i, qty: String(Math.round(ratio * 2) / 2) };
