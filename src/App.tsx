@@ -14,7 +14,6 @@ import {
   Flame,
   Home,
   Leaf,
-  Menu,
   Plus,
   Search,
   Settings,
@@ -34,7 +33,7 @@ import {
   Tooltip,
   XAxis,
 } from "recharts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { api } from "./api";
 import { addDays, dateLabel, formatNumber, localDate } from "./utils";
@@ -119,7 +118,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
   const [selectedDate, setSelectedDate] = useState(localDate());
   const [recentFoodIds, setRecentFoodIds] = useState<number[]>([]);
   const [backup, setBackup] = useState<BackupStatus>({ last_backup_at: null, has_data: false });
@@ -224,55 +223,50 @@ export default function App() {
 
   const pageHeading = navItems.find((item) => item.key === page)?.label ?? "Overview";
 
-  return (
-    <div className="min-h-screen bg-night text-white">
-      <div className="mx-auto flex min-h-screen max-w-[1600px]">
-        <aside className="hidden w-[248px] shrink-0 border-r border-line/80 px-5 py-7 lg:flex lg:flex-col">
-          <Brand />
-          <div className="mt-12">
-            <p className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[.2em] text-muted">Workspace</p>
-            <Navigation page={page} onSelect={setPage} />
-          </div>
-          <div className="mt-auto rounded-2xl border border-line bg-panel p-4">
-            <div className="flex items-center gap-2 text-lime"><ShieldCheck size={15} /><span className="text-xs font-semibold">Local-first</span></div>
-            <p className="mt-2 text-xs leading-5 text-muted">Your entries are stored on this device only. No account or cloud sync.</p>
-          </div>
-        </aside>
+  // Each tab starts at the top, like a native tab bar.
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 });
+  }, [page]);
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-30 flex h-[72px] items-center justify-between border-b border-line/70 bg-night/90 px-4 backdrop-blur-xl sm:px-7 lg:px-10">
-            <div className="flex items-center gap-3">
-              <button
-                className="rounded-xl border border-line p-2 text-muted lg:hidden"
-                onClick={() => setMobileMenuOpen((open) => !open)}
-                aria-label="Toggle menu"
-              >
-                <Menu size={18} />
-              </button>
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-[.18em] text-muted">Fitness tracker</p>
-                <h1 className="mt-0.5 text-sm font-semibold text-white sm:text-base">{pageHeading}</h1>
-              </div>
+  return (
+    <div className="flex h-[100dvh] overflow-hidden bg-night text-white">
+      <aside className="hidden w-[248px] shrink-0 overflow-y-auto border-r border-line/80 px-5 py-7 lg:flex lg:flex-col">
+        <Brand />
+        <div className="mt-12">
+          <p className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[.2em] text-muted">Workspace</p>
+          <Navigation page={page} onSelect={setPage} />
+        </div>
+        <div className="mt-auto rounded-2xl border border-line bg-panel p-4">
+          <div className="flex items-center gap-2 text-lime"><ShieldCheck size={15} /><span className="text-xs font-semibold">Local-first</span></div>
+          <p className="mt-2 text-xs leading-5 text-muted">Your entries are stored on this device only. No account or cloud sync.</p>
+        </div>
+      </aside>
+
+      {/* App shell: header and tab bar stay put; only <main> scrolls (no whole-page bounce on iPhone). */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="z-30 shrink-0 border-b border-line/70 bg-night pt-[env(safe-area-inset-top)]">
+          <div className="flex h-14 items-center justify-between px-4 sm:h-[72px] sm:px-7 lg:px-10">
+            <div>
+              <p className="hidden text-[10px] font-semibold uppercase tracking-[.18em] text-muted sm:block">Fitness tracker</p>
+              <h1 className="text-lg font-semibold text-white sm:mt-0.5 sm:text-base">{pageHeading}</h1>
             </div>
             <div className="flex items-center gap-2 sm:gap-4">
               <div className="hidden items-center gap-2 rounded-full border border-line bg-panel px-3 py-2 text-xs text-muted sm:flex">
                 <CalendarDays size={13} className="text-lime" /> {dateLabel(selectedDate)}
               </div>
+              <button onClick={() => openWorkoutEditor()} className="button-secondary !min-h-10 !px-3 sm:hidden" aria-label="Log a workout">
+                <Dumbbell size={16} />
+              </button>
               <button onClick={() => openModal("meal")} className="button-primary !min-h-10 !px-3 sm:!px-4">
-                <Plus size={16} /><span className="hidden sm:inline">Log food</span><span className="sm:hidden">Log</span>
+                <Plus size={16} /><span className="hidden sm:inline">Log food</span><span className="sm:hidden">Food</span>
               </button>
             </div>
-          </header>
+          </div>
+        </header>
 
-          {mobileMenuOpen && (
-            <div className="absolute left-0 right-0 top-[72px] z-40 border-b border-line bg-panel p-3 lg:hidden">
-              <Navigation page={page} onSelect={(next) => { setPage(next); setMobileMenuOpen(false); }} />
-            </div>
-          )}
-
-          <main className="flex-1 px-4 pb-28 pt-6 sm:px-7 sm:pt-8 lg:px-10 lg:pb-10">
-            {error && <Alert message={error} onDismiss={() => setError("")} />}
-            {notice && <Notice message={notice} onDismiss={() => setNotice("")} />}
+        {/* `relative` keeps absolutely positioned children (sr-only labels, chart tooltips) inside this
+            scroll box; otherwise they stretch the document and iOS lets the whole page scroll. */}
+        <main ref={mainRef} className="relative flex-1 overflow-y-auto overscroll-contain px-4 pb-6 pt-4 sm:px-7 sm:pt-8 lg:px-10 lg:pb-10">
             {loading ? (
               <LoadingState />
             ) : page === "dashboard" ? (
@@ -326,11 +320,17 @@ export default function App() {
                 onImport={(backup) => runAction(() => api.importData(backup), "Backup restored.")}
               />
             )}
-          </main>
-        </div>
-      </div>
+        </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-panel/95 px-2 pb-[max(env(safe-area-inset-bottom),8px)] pt-2 backdrop-blur-xl lg:hidden">
+        {/* Toasts float just above the tab bar instead of pushing content down. */}
+        <div className="relative z-40 h-0">
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex flex-col items-center gap-2 px-4">
+            {error && <Toast tone="error" message={error} onDismiss={() => setError("")} />}
+            {notice && <Toast tone="ok" message={notice} onDismiss={() => setNotice("")} />}
+          </div>
+        </div>
+
+        <nav className="z-30 shrink-0 border-t border-line bg-panel px-2 pb-[max(env(safe-area-inset-bottom),8px)] pt-2 lg:hidden">
         <div className="mx-auto flex max-w-lg justify-around">
           {navItems.map(({ key, label, icon: Icon }) => (
             <button key={key} onClick={() => setPage(key)} className={`flex min-w-[60px] flex-col items-center gap-1 rounded-xl px-1.5 py-1.5 ${page === key ? "text-lime" : "text-muted"}`}>
@@ -340,6 +340,7 @@ export default function App() {
           ))}
         </div>
       </nav>
+      </div>
 
       {modal === "food" && (
         <ModalShell title={editingFood ? "Edit food" : "Add a food"} eyebrow="FOOD LIBRARY" onClose={closeModal}>
@@ -488,7 +489,7 @@ function DashboardPage({
 
   return (
     <div className="mx-auto max-w-[1180px]">
-      <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+      <div className="mb-7 hidden flex-wrap items-end justify-between gap-4 sm:flex">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted"><Sparkles size={14} className="text-lime" /> YOUR DAILY CHECK-IN</div>
           <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Build a rhythm that lasts.</h2>
@@ -504,7 +505,7 @@ function DashboardPage({
       <BackupBanner backup={backup} onBackup={onBackup} onOpenSettings={() => onNavigate("settings")} />
 
       <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]">
-        <section className="rounded-3xl border border-line bg-panel p-5 sm:p-6">
+        <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="flex items-center gap-2 text-xs font-medium text-muted"><Flame size={15} className="text-lime" /> DAILY ENERGY</div>
@@ -528,7 +529,7 @@ function DashboardPage({
           </div>
         </section>
 
-        <section className="rounded-3xl border border-line bg-panel p-5 sm:p-6">
+        <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-medium text-muted"><Target size={15} className="text-mint" /> WEEKLY MOVEMENT</div>
             <span className="rounded-full bg-night px-2.5 py-1 text-[10px] text-muted">MON – SUN</span>
@@ -544,7 +545,7 @@ function DashboardPage({
         </section>
       </div>
 
-      <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
           <div><h3 className="font-semibold">Nutrition breakdown</h3><p className="mt-1 text-xs text-muted">Logged food compared with your personal targets</p></div>
           <button onClick={onSetTargets} className="text-xs font-medium text-lime hover:text-white">{Object.values(data.targets).every((value) => value === null) ? "Set targets" : "Edit targets"}</button>
@@ -569,7 +570,7 @@ function DashboardPage({
       </section>
 
       <div className="mt-4 grid gap-4 xl:grid-cols-[1.4fr_1fr]">
-        <section className="rounded-3xl border border-line bg-panel p-5 sm:p-6">
+        <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
           <div className="mb-5 flex items-center justify-between">
             <div><h3 className="font-semibold">This week</h3><p className="mt-1 text-xs text-muted">Food and training at a glance</p></div>
             <BarChart3 size={17} className="text-muted" />
@@ -592,7 +593,7 @@ function DashboardPage({
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted"><span className="h-2 w-2 rounded-sm bg-lime" />Calories logged per day <span className="ml-auto">{data.weekly.days.reduce((sum, day) => sum + day.workouts, 0)} workout sessions</span></div>
         </section>
 
-        <section className="rounded-3xl border border-line bg-panel p-5 sm:p-6">
+        <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
           <div className="mb-4 flex items-center justify-between">
             <div><h3 className="font-semibold">{isToday ? "Today's" : `${day}'s`} training</h3><p className="mt-1 text-xs text-muted">Tap a session to edit it</p></div>
             <button onClick={onLogWorkout} className="rounded-lg border border-line p-2 text-muted transition hover:border-mint/50 hover:text-mint" aria-label="Log a workout"><Plus size={16} /></button>
@@ -616,7 +617,7 @@ function DashboardPage({
         </section>
       </div>
 
-      <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="mb-4 flex items-center justify-between">
           <div><h3 className="font-semibold">{isToday ? "Today's" : `${day}'s`} food</h3><p className="mt-1 text-xs text-muted">Tap an entry to change its portion</p></div>
           <button onClick={onLogMeal} className="button-secondary !min-h-9 !px-3"><Plus size={14} /> Add meal</button>
@@ -1249,18 +1250,18 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
   return (
     <div className="mx-auto max-w-[850px]">
       <PageIntro eyebrow="PREFERENCES" title="Settings" detail="Choose the targets and units that fit how you track." />
-      <section className="rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="flex items-start justify-between gap-4">
           <div><div className="flex items-center gap-2"><Target size={16} className="text-lime" /><h3 className="font-semibold">Daily and weekly targets</h3></div><p className="mt-2 text-xs text-muted">Targets are optional and editable whenever you need.</p></div>
           <button onClick={onEditTargets} className="button-secondary !min-h-9 !px-3">Edit targets</button>
         </div>
         <div className="mt-5 grid gap-2 sm:grid-cols-2">{targetRows.map(([label, value]) => <div key={label} className="flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">{label}</span><span className="text-xs font-medium">{value}</span></div>)}</div>
       </section>
-      <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="flex items-center gap-2"><Settings size={16} className="text-mint" /><h3 className="font-semibold">Units</h3></div>
         <div className="mt-4 flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">Weight and food portions</span><span className="rounded-full bg-mint/10 px-2.5 py-1 text-[10px] font-semibold text-mint">Metric · kg / g</span></div>
       </section>
-      <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="flex items-center gap-2"><ShieldCheck size={16} className="text-lime" /><h3 className="font-semibold">Your data</h3></div>
         <p className="mt-2 max-w-xl text-xs leading-5 text-muted">Everything is stored on this device only. There is no account, cloud sync, or third-party nutrition service. Back up regularly: tap Back up, then choose <b className="font-medium text-zinc-300">Save to Files</b> (iCloud Drive). Deleting the app from your Home Screen deletes its data.</p>
         <div className={`mt-4 flex items-center justify-between rounded-xl px-3.5 py-3 ${age === null || age >= BACKUP_REMIND_DAYS ? "bg-amber-200/5" : "bg-night"}`}>
@@ -1278,8 +1279,9 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
 
 function PageIntro({ eyebrow, title, detail, action }: { eyebrow: string; title: string; detail: string; action?: ReactNode }) {
   return (
-    <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
-      <div><p className="mb-2 text-[10px] font-bold tracking-[.2em] text-lime">{eyebrow}</p><h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h2><p className="mt-2 max-w-xl text-sm leading-6 text-muted">{detail}</p></div>
+    // On phones the header already shows the page title, so only the short description and action remain.
+    <div className="mb-4 flex items-center justify-between gap-3 sm:mb-7 sm:flex-wrap sm:items-end sm:gap-4">
+      <div className="min-w-0"><p className="mb-2 hidden text-[10px] font-bold tracking-[.2em] text-lime sm:block">{eyebrow}</p><h2 className="hidden text-2xl font-semibold tracking-tight sm:block sm:text-3xl">{title}</h2><p className="max-w-xl text-xs leading-5 text-muted sm:mt-2 sm:text-sm sm:leading-6">{detail}</p></div>
       {action}
     </div>
   );
@@ -1299,7 +1301,7 @@ function EmptyState({ icon: Icon, title, detail, action, onClick }: { icon: type
 function ModalShell({ title, eyebrow, onClose, children }: { title: string; eyebrow: string; onClose: () => void; children: ReactNode }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="max-h-[94dvh] w-full overflow-y-auto rounded-t-3xl border border-line bg-panel p-5 shadow-2xl sm:max-w-[540px] sm:rounded-3xl sm:p-6">
+      <section className="relative max-h-[calc(100dvh_-_env(safe-area-inset-top)_-_12px)] w-full overflow-y-auto overscroll-contain rounded-t-3xl border border-line bg-panel p-5 pb-[max(env(safe-area-inset-bottom),20px)] shadow-2xl sm:max-h-[94dvh] sm:max-w-[540px] sm:rounded-3xl sm:p-6">
         <div className="mb-5 flex items-start justify-between">
           <div><p className="text-[9px] font-bold tracking-[.2em] text-lime">{eyebrow}</p><h2 className="mt-1.5 text-xl font-semibold">{title}</h2></div>
           <button onClick={onClose} className="rounded-xl border border-line p-2 text-muted transition hover:bg-panel-raised hover:text-white" aria-label="Close"><X size={16} /></button>
@@ -1330,8 +1332,21 @@ function Alert({ message, onDismiss }: { message: string; onDismiss?: () => void
   return <div role="alert" className="mb-5 flex items-start justify-between gap-3 rounded-2xl border border-red-300/20 bg-red-400/5 px-4 py-3 text-xs leading-5 text-red-200"><span>{message}</span>{onDismiss && <button onClick={onDismiss} className="shrink-0 text-red-200/70 hover:text-red-100" aria-label="Dismiss"><X size={14} /></button>}</div>;
 }
 
-function Notice({ message, onDismiss }: { message: string; onDismiss: () => void }) {
-  return <div role="status" className="mb-5 flex items-center justify-between gap-3 rounded-2xl border border-mint/20 bg-mint/5 px-4 py-3 text-xs text-mint"><span className="flex items-center gap-2"><Check size={14} />{message}</span><button onClick={onDismiss} aria-label="Dismiss"><X size={14} /></button></div>;
+function Toast({ tone, message, onDismiss }: { tone: "ok" | "error"; message: string; onDismiss: () => void }) {
+  // Auto-hide: confirmations quickly, errors after giving time to read.
+  useEffect(() => {
+    const id = window.setTimeout(onDismiss, tone === "ok" ? 2200 : 6000);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- restart only for a new message
+  }, [message, tone]);
+  const styles = tone === "ok" ? "border-mint/30 text-mint" : "border-red-300/30 text-red-200";
+  return (
+    <div role={tone === "ok" ? "status" : "alert"} className={`toast-in pointer-events-auto flex max-w-md items-center gap-2.5 rounded-2xl border bg-panel-raised px-4 py-2.5 text-xs shadow-2xl ${styles}`}>
+      {tone === "ok" ? <Check size={14} className="shrink-0" /> : <X size={14} className="shrink-0" />}
+      <span className="leading-5">{message}</span>
+      <button onClick={onDismiss} className="ml-1 shrink-0 opacity-60" aria-label="Dismiss"><X size={13} /></button>
+    </div>
+  );
 }
 
 function LoadingState() {

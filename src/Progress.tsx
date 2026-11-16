@@ -33,15 +33,15 @@ export function ProgressPage({ onError }: { onError: (message: string) => void }
 
   return (
     <div className="mx-auto max-w-[1050px]">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-4 sm:mb-6">
+        <div className="hidden sm:block">
           <p className="mb-2 text-[10px] font-bold tracking-[.2em] text-lime">YOUR TRENDS</p>
           <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Progress</h2>
           <p className="mt-2 max-w-xl text-sm leading-6 text-muted">Averages, streaks, body weight and lifts over time.</p>
         </div>
-        <div className="flex rounded-xl border border-line bg-panel p-1">
+        <div className="flex w-full rounded-xl border border-line bg-panel p-1 sm:w-auto">
           {RANGES.map((value) => (
-            <button key={value} onClick={() => setRange(value)} className={`rounded-lg px-3.5 py-1.5 text-xs font-medium transition ${range === value ? "bg-lime text-night" : "text-muted hover:text-white"}`}>
+            <button key={value} onClick={() => setRange(value)} className={`flex-1 rounded-lg px-3.5 py-1.5 sm:flex-none text-xs font-medium transition ${range === value ? "bg-lime text-night" : "text-muted hover:text-white"}`}>
               {value}D
             </button>
           ))}
@@ -77,7 +77,7 @@ function TrendsSection({ trends, range }: { trends: Trends; range: Range }) {
         <StatCard icon={<Dumbbell size={15} className="text-mint" />} label="Workouts" value={formatNumber(totalWorkouts / (range / 7))} unit="/ week" detail={`${totalWorkouts} sessions in ${range} days`} />
       </div>
 
-      <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
           <div><h3 className="font-semibold">Daily averages</h3><p className="mt-1 text-xs text-muted">Across the {logged.length} days you logged food</p></div>
         </div>
@@ -100,7 +100,7 @@ function TrendsSection({ trends, range }: { trends: Trends; range: Range }) {
         )}
       </section>
 
-      <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="mb-4"><h3 className="font-semibold">Calories per day</h3><p className="mt-1 text-xs text-muted">{calorieTarget ? `Dashed line: your ${formatNumber(calorieTarget)} kcal target` : "Set a calorie target to see it here"}</p></div>
         <div className="h-[220px] w-full">
           <ResponsiveContainer width="100%" height="100%">
@@ -193,7 +193,7 @@ function WeightSection({ weights, range, onChanged, onError }: { weights: BodyWe
   }
 
   return (
-    <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+    <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2"><Scale size={16} className="text-lime" /><h3 className="font-semibold">Body weight</h3></div>
@@ -274,7 +274,7 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
 
   if (exercises.length === 0) {
     return (
-      <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="flex items-center gap-2"><Trophy size={16} className="text-mint" /><h3 className="font-semibold">Lift progress</h3></div>
         <p className="mt-4 rounded-2xl border border-dashed border-line p-5 text-center text-xs text-muted">Log workouts to see each exercise's progress here.</p>
       </section>
@@ -286,7 +286,7 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
   const chartData = points.map((point) => ({ ...point, label: shortDate(point.date) }));
 
   return (
-    <section className="mt-4 rounded-3xl border border-line bg-panel p-5 sm:p-6">
+    <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2"><Trophy size={16} className="text-mint" /><h3 className="font-semibold">Lift progress</h3></div>
         <div className="flex rounded-xl border border-line bg-night p-1">

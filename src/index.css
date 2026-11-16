@@ -13,9 +13,40 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
+
+/* App-like behaviour: the document itself never scrolls or bounces; the app shell's
+   <main> (and modals) scroll instead. */
+html, body, #root { height: 100%; }
+html, body {
+  margin: 0;
+  min-width: 320px;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  -webkit-tap-highlight-color: transparent; /* no grey flash on tap */
+}
+/* No text-selection or long-press callouts on controls, like a native app. */
+button, nav, header, label, [role="status"] {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* iOS Safari zooms the whole page into any field with text under 16px and stays zoomed.
+   This rule applies on iOS only, so desktop keeps the smaller type. */
+@supports (-webkit-touch-callout: none) {
+  input, select, textarea { font-size: 16px !important; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.toast-in { animation: toast-in 0.18s ease-out; }
 
 @layer components {
   .nav-item {
