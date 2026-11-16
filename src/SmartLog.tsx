@@ -14,6 +14,7 @@ import { formatNumber } from "./utils";
 
 export type SmartLogEntry = { choice: Choice; grams: number };
 
+const PHOTO_LINE = "From photo";
 const MEAL_TYPES = ["breakfast", "lunch", "dinner", "snack"];
 
 function aiChoice(item: AiFoodItem): Choice {
@@ -55,7 +56,8 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
     const id = window.setTimeout(() => {
       setLines((current) => {
         const parsed = text.trim() ? quickLog(text, foods, db) : [];
-        const ai = current.filter((line) => line.choice?.kind === "ai");
+        // Photo estimates stay; estimates made from the text only while that text is unchanged.
+        const ai = current.filter((line) => line.choice?.kind === "ai" && (line.text === PHOTO_LINE || aiCoveredText === text));
         return [...(aiCoveredText === text ? parsed.filter((line) => line.choice) : parsed), ...ai];
       });
     }, 300);
@@ -111,7 +113,7 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
     setAiError("");
     try {
       const items = await estimateMealFromPhoto(await photoToJpegBase64(file), text);
-      setLines((current) => [...current, ...items.map((item) => aiLine(item, "From photo"))]);
+      setLines((current) => [...current, ...items.map((item) => aiLine(item, PHOTO_LINE))]);
     } catch (cause) {
       setAiError(await friendlyError(cause));
     } finally {
