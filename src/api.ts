@@ -1,6 +1,7 @@
 // On-device data layer. Everything is stored in this browser's IndexedDB on the phone:
 // no server, works offline. Mirrors the calculations the old FastAPI backend did.
-import type { BackupStatus, BodyWeight, DayLog, FoodSource, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
+import { sleepHours } from "./utils";
+import type { BackupStatus, BodyWeight, Cardio, CardioType, DayLog, FoodSource, Habit, HabitStatus, Measurement, MeasureKey, Sleep, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 type MealBody = { food_id: number; date: string; meal_type: string; portion_g: number };
@@ -14,13 +15,16 @@ type StoredMeal = Meal & { created_at: number };
 
 type State = {
   version: 1;
-  next_id: { food: number; meal: number; workout: number; set: number; weight: number };
+  next_id: { food: number; meal: number; workout: number; set: number; weight: number; habit: number; cardio: number; measure: number };
   targets: Targets | null;
   foods: Food[];
   meals: StoredMeal[];
   workouts: Workout[];
   weights: BodyWeight[];
-  days: Record<string, DayLog>; // water and notes, keyed by YYYY-MM-DD
+  days: Record<string, Partial<DayLog>>; // water, notes, sleep, steps, habits ticked; keyed by YYYY-MM-DD
+  habits: Habit[];
+  cardio: Cardio[];
+  measurements: Measurement[];
   last_backup_at: number | null;
 };
 
@@ -32,7 +36,10 @@ export type ExportFile = {
   meals: Meal[];
   workouts: Workout[];
   weights?: BodyWeight[]; // absent in backups made before body weight tracking
-  days?: Record<string, DayLog>; // absent in backups made before water/notes
+  days?: Record<string, Partial<DayLog>>; // absent in backups made before water/notes
+  habits?: Habit[];
+  cardio?: Cardio[];
+  measurements?: Measurement[];
 };
 
 const DB_NAME = "fitness-tracker";
@@ -40,7 +47,7 @@ const STORE = "kv";
 const KEY = "state";
 
 function emptyState(): State {
-  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, last_backup_at: null };
+  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1, habit: 1, cardio: 1, measure: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, habits: [], cardio: [], measurements: [], last_backup_at: null };
 }
 
 // Brings data saved by older versions of the app up to the current shape.
@@ -49,7 +56,17 @@ function migrate(state: State): State {
   state.last_backup_at ??= null;
   state.weights ??= [];
   state.days ??= {};
-  if (state.targets) state.targets.water_ml ??= null;
+  state.habits ??= [];
+  state.cardio ??= [];
+  state.measurements ??= [];
+  const nextAfter = (items: { id: number }[]) => items.reduce((max, item) => Math.max(max, item.id), 0) + 1;
+  state.next_id.habit ??= nextAfter(state.habits);
+  state.next_id.cardio ??= nextAfter(state.cardio);
+  state.next_id.measure ??= nextAfter(state.measurements);
+  if (state.targets) {
+    state.targets.water_ml ??= null;
+    state.targets.steps ??= null;
+  }
   state.next_id.weight ??= state.weights.reduce((max, entry) => Math.max(max, entry.id), 0) + 1;
   return state;
 }
@@ -157,12 +174,12 @@ function cleanTargets(body: Targets): Targets {
     const value = body[key];
     if (value === null || value === undefined) continue;
     if (!isNum(value) || value <= 0) fail("Targets must be positive numbers, or left blank.");
-    out[key] = key === "calories" || key === "workouts_per_week" || key === "water_ml" ? Math.round(value) : value;
+    out[key] = key === "protein_g" || key === "carbohydrates_g" || key === "fat_g" || key === "fiber_g" ? value : Math.round(value);
   }
   return out;
 }
 
-const EMPTY_TARGETS: Targets = { calories: null, protein_g: null, carbohydrates_g: null, fat_g: null, fiber_g: null, workouts_per_week: null, water_ml: null };
+const EMPTY_TARGETS: Targets = { calories: null, protein_g: null, carbohydrates_g: null, fat_g: null, fiber_g: null, workouts_per_week: null, water_ml: null, steps: null };
 
 // ---------- date helpers (YYYY-MM-DD strings, timezone-safe) ----------
 
@@ -170,6 +187,19 @@ const DAY_MS = 86_400_000;
 const toUtc = (day: string) => Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8, 10)));
 const fromUtc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function fullDay(entry: Partial<DayLog> | undefined): DayLog {
+  return { water_ml: entry?.water_ml ?? 0, note: entry?.note ?? "", sleep: entry?.sleep ?? null, steps: entry?.steps ?? null, habits_done: entry?.habits_done ?? [] };
+}
+function editDay(state: State, date: string): DayLog {
+  const entry = fullDay(state.days[date]);
+  state.days[date] = entry;
+  return entry;
+}
+
+const CARDIO_TYPES: CardioType[] = ["run", "walk", "cycle", "swim", "other"];
+const MEASURE_KEYS: MeasureKey[] = ["waist_cm", "hips_cm", "chest_cm", "arm_cm", "thigh_cm", "body_fat_pct"];
+const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const publicMeal = ({ created_at: _created, ...meal }: StoredMeal): Meal => meal;
 
@@ -204,7 +234,7 @@ export const api = {
         date: iso,
         label: WEEKDAYS[new Date(ms).getUTCDay()],
         calories: sum(state.meals.filter((meal) => meal.date === iso), "calories"),
-        workouts: state.workouts.filter((workout) => workout.date === iso).length,
+        workouts: state.workouts.filter((workout) => workout.date === iso).length + state.cardio.filter((session) => session.date === iso).length,
       };
     });
 
@@ -341,7 +371,7 @@ export const api = {
 
   async backupStatus(): Promise<BackupStatus> {
     const state = await load();
-    return { last_backup_at: state.last_backup_at, has_data: state.foods.length + state.meals.length + state.workouts.length + state.weights.length + Object.keys(state.days).length > 0 };
+    return { last_backup_at: state.last_backup_at, has_data: state.foods.length + state.meals.length + state.workouts.length + state.weights.length + state.cardio.length + state.measurements.length + Object.keys(state.days).length > 0 };
   },
 
   markBackedUp: () =>
@@ -392,24 +422,135 @@ export const api = {
   // ---------- water and notes ----------
 
   async day(date: string): Promise<DayLog> {
-    const entry = (await load()).days[date];
-    return { water_ml: entry?.water_ml ?? 0, note: entry?.note ?? "" };
+    return fullDay((await load()).days[date]);
   },
 
   addWater: (date: string, ml: number) =>
     mutate((state) => {
-      const entry = state.days[date] ?? { water_ml: 0, note: "" };
+      const entry = editDay(state, date);
       entry.water_ml = Math.max(0, Math.min(20000, entry.water_ml + Math.round(ml)));
-      state.days[date] = entry;
       return entry.water_ml;
     }),
 
   setNote: (date: string, note: string) =>
     mutate((state) => {
-      const entry = state.days[date] ?? { water_ml: 0, note: "" };
-      entry.note = note.slice(0, 2000);
-      state.days[date] = entry;
+      editDay(state, date).note = note.slice(0, 2000);
     }),
+
+  // ---------- sleep and steps ----------
+
+  /** Saves last night's sleep under `date` (the morning you woke up). Pass null to clear. */
+  saveSleep: (date: string, sleep: Sleep | null) =>
+    mutate((state) => {
+      if (sleep) {
+        if (!TIME.test(sleep.bed) || !TIME.test(sleep.wake)) fail("Enter bed and wake times.");
+        if (!Number.isInteger(sleep.quality) || sleep.quality < 1 || sleep.quality > 5) fail("Rate sleep quality from 1 to 5.");
+      }
+      editDay(state, date).sleep = sleep;
+    }),
+
+  setSteps: (date: string, steps: number | null) =>
+    mutate((state) => {
+      if (steps !== null && (!Number.isInteger(steps) || steps < 0 || steps > 200000)) fail("Steps must be a whole number up to 200,000.");
+      editDay(state, date).steps = steps;
+    }),
+
+  // ---------- habits ----------
+
+  /** Active habits with whether they're done on `date`, and each one's streak up to `date`. */
+  async habits(date: string): Promise<HabitStatus[]> {
+    const state = await load();
+    return state.habits.filter((habit) => !habit.archived).map((habit) => {
+      const doneOn = (day: string) => fullDay(state.days[day]).habits_done.includes(habit.id);
+      // Streak counts back from `date`; if it isn't ticked yet that day, start from the day before.
+      let cursor = toUtc(date);
+      if (!doneOn(date)) cursor -= DAY_MS;
+      let streak = 0;
+      while (doneOn(fromUtc(cursor))) { streak++; cursor -= DAY_MS; }
+      return { id: habit.id, name: habit.name, done: doneOn(date), streak };
+    });
+  },
+
+  toggleHabit: (date: string, habitId: number) =>
+    mutate((state) => {
+      const entry = editDay(state, date);
+      entry.habits_done = entry.habits_done.includes(habitId) ? entry.habits_done.filter((id) => id !== habitId) : [...entry.habits_done, habitId];
+    }),
+
+  addHabit: (name: string) =>
+    mutate((state) => {
+      const clean = name.trim();
+      if (!clean || clean.length > 60) fail("Habit names are 1–60 characters.");
+      const active = state.habits.filter((habit) => !habit.archived);
+      if (active.length >= 20) fail("You can track up to 20 habits.");
+      if (active.some((habit) => habit.name.toLowerCase() === clean.toLowerCase())) fail("You already have that habit.");
+      state.habits.push({ id: state.next_id.habit++, name: clean, archived: false });
+    }),
+
+  /** Hides a habit; its history stays in the days it was ticked. */
+  removeHabit: (id: number) =>
+    mutate((state) => {
+      const habit = state.habits.find((item) => item.id === id) ?? fail("Habit not found.");
+      habit.archived = true;
+    }, { undoable: true }),
+
+  // ---------- cardio ----------
+
+  async cardio(): Promise<Cardio[]> {
+    return [...(await load()).cardio].sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id).slice(0, 100);
+  },
+
+  saveCardio: (body: Omit<Cardio, "id">, id?: number) =>
+    mutate((state) => {
+      if (!CARDIO_TYPES.includes(body.type)) fail("Choose an activity.");
+      if (!isNum(body.minutes) || body.minutes <= 0 || body.minutes > 1440) fail("Enter a duration in minutes.");
+      if (body.distance_km !== null && (!isNum(body.distance_km) || body.distance_km < 0 || body.distance_km > 1000)) fail("Distance must be 0–1,000 km.");
+      if (body.kcal !== null && (!isNum(body.kcal) || body.kcal < 0 || body.kcal > 20000)) fail("Calories must be 0–20,000.");
+      const clean: Omit<Cardio, "id"> = { date: body.date, type: body.type, minutes: Math.round(body.minutes), distance_km: body.distance_km, kcal: body.kcal === null ? null : Math.round(body.kcal), note: body.note?.trim().slice(0, 300) || null };
+      if (id === undefined) {
+        const session: Cardio = { ...clean, id: state.next_id.cardio++ };
+        state.cardio.push(session);
+        return session;
+      }
+      const index = state.cardio.findIndex((item) => item.id === id);
+      if (index < 0) fail("Session not found.");
+      state.cardio[index] = { ...clean, id };
+      return state.cardio[index];
+    }),
+
+  deleteCardio: (id: number) =>
+    mutate((state) => {
+      if (!state.cardio.some((item) => item.id === id)) fail("Session not found.");
+      state.cardio = state.cardio.filter((item) => item.id !== id);
+    }, { undoable: true }),
+
+  // ---------- body measurements ----------
+
+  async measurements(): Promise<Measurement[]> {
+    return [...(await load()).measurements].sort((a, b) => a.date.localeCompare(b.date));
+  },
+
+  /** One entry per day: saving again for the same day replaces it. */
+  saveMeasurement: (date: string, values: Record<MeasureKey, number | null>) =>
+    mutate((state) => {
+      const clean = {} as Record<MeasureKey, number | null>;
+      for (const key of MEASURE_KEYS) {
+        const value = values[key];
+        if (value === null || value === undefined) { clean[key] = null; continue; }
+        const max = key === "body_fat_pct" ? 75 : 300;
+        if (!isNum(value) || value <= 0 || value > max) fail(key === "body_fat_pct" ? "Body fat must be between 0 and 75%." : "Measurements must be between 0 and 300 cm.");
+        clean[key] = Math.round(value * 10) / 10;
+      }
+      if (MEASURE_KEYS.every((key) => clean[key] === null)) fail("Enter at least one measurement.");
+      const existing = state.measurements.find((entry) => entry.date === date);
+      if (existing) Object.assign(existing, clean);
+      else state.measurements.push({ id: state.next_id.measure++, date, ...clean });
+    }),
+
+  deleteMeasurement: (id: number) =>
+    mutate((state) => {
+      state.measurements = state.measurements.filter((entry) => entry.id !== id);
+    }, { undoable: true }),
 
   // ---------- trends ----------
 
@@ -419,7 +560,7 @@ export const api = {
     const endMs = toUtc(end);
     const list: TrendDay[] = Array.from({ length: days }, (_, index) => ({
       date: fromUtc(endMs - (days - 1 - index) * DAY_MS),
-      calories: 0, protein_g: 0, carbohydrates_g: 0, fat_g: 0, fiber_g: 0, workouts: 0, logged: false,
+      calories: 0, protein_g: 0, carbohydrates_g: 0, fat_g: 0, fiber_g: 0, workouts: 0, logged: false, sleep_h: null, steps: null,
     }));
     const byDate = new Map(list.map((day) => [day.date, day]));
     for (const meal of state.meals) {
@@ -432,9 +573,14 @@ export const api = {
       day.fat_g += meal.fat_g;
       day.fiber_g += meal.fiber_g;
     }
-    for (const workout of state.workouts) {
-      const day = byDate.get(workout.date);
+    for (const session of [...state.workouts, ...state.cardio]) {
+      const day = byDate.get(session.date);
       if (day) day.workouts += 1;
+    }
+    for (const day of list) {
+      const entry = state.days[day.date];
+      if (entry?.sleep) day.sleep_h = sleepHours(entry.sleep.bed, entry.sleep.wake);
+      if (entry?.steps != null) day.steps = entry.steps;
     }
 
     // Food streak: consecutive days with a meal, ending today (today may still be empty).
@@ -447,7 +593,7 @@ export const api = {
     const target = state.targets?.workouts_per_week ?? 1;
     const weekCount = new Map<number, number>();
     const weekStart = (ms: number) => ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY_MS;
-    for (const workout of state.workouts) {
+    for (const workout of [...state.workouts, ...state.cardio]) {
       const start = weekStart(toUtc(workout.date));
       weekCount.set(start, (weekCount.get(start) ?? 0) + 1);
     }
@@ -509,6 +655,9 @@ export const api = {
       workouts: [...state.workouts].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id),
       weights: [...state.weights].sort((a, b) => a.date.localeCompare(b.date)),
       days: state.days,
+      habits: state.habits,
+      cardio: [...state.cardio].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id),
+      measurements: [...state.measurements].sort((a, b) => a.date.localeCompare(b.date)),
     };
   },
 
@@ -534,9 +683,19 @@ export const api = {
       if (data.days && typeof data.days === "object") {
         for (const [date, entry] of Object.entries(data.days)) {
           if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !entry) continue;
-          state.days[date] = { water_ml: isNum(entry.water_ml) ? Math.max(0, entry.water_ml) : 0, note: typeof entry.note === "string" ? entry.note.slice(0, 2000) : "" };
+          const sleep = entry.sleep && TIME.test(entry.sleep.bed) && TIME.test(entry.sleep.wake) && isNum(entry.sleep.quality) ? entry.sleep : null;
+          state.days[date] = {
+            water_ml: isNum(entry.water_ml) ? Math.max(0, entry.water_ml) : 0,
+            note: typeof entry.note === "string" ? entry.note.slice(0, 2000) : "",
+            sleep,
+            steps: isNum(entry.steps) ? Math.max(0, Math.round(entry.steps)) : null,
+            habits_done: Array.isArray(entry.habits_done) ? entry.habits_done.filter(isNum) : [],
+          };
         }
       }
+      state.habits = (Array.isArray(data.habits) ? data.habits : []).filter((habit) => habit && isNum(habit.id) && typeof habit.name === "string").map((habit) => ({ id: habit.id, name: habit.name.slice(0, 60), archived: Boolean(habit.archived) }));
+      state.cardio = (Array.isArray(data.cardio) ? data.cardio : []).filter((session) => session && isNum(session.id) && typeof session.date === "string" && isNum(session.minutes) && CARDIO_TYPES.includes(session.type));
+      state.measurements = (Array.isArray(data.measurements) ? data.measurements : []).filter((entry) => entry && isNum(entry.id) && typeof entry.date === "string");
       state.last_backup_at = Date.now(); // the file just restored from is a backup
       state.next_id = {
         food: maxId(foods.map((food) => food.id)),
@@ -544,6 +703,9 @@ export const api = {
         workout: maxId(workouts.map((workout) => workout.id)),
         set: maxId(workouts.flatMap((workout) => workout.sets.map((set) => set.id ?? 0))),
         weight: maxId(state.weights.map((entry) => entry.id)),
+        habit: maxId(state.habits.map((habit) => habit.id)),
+        cardio: maxId(state.cardio.map((session) => session.id)),
+        measure: maxId(state.measurements.map((entry) => entry.id)),
       };
       return { foods: foods.length, meals: meals.length, workouts: workouts.length };
     }),

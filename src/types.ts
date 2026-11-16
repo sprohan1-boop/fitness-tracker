@@ -6,13 +6,28 @@ export type Targets = {
   fiber_g: number | null;
   workouts_per_week: number | null;
   water_ml: number | null;
+  steps: number | null;
 };
 
 export type Serving = { label: string; grams: number };
 
 export type BackupStatus = { last_backup_at: number | null; has_data: boolean };
 
-export type DayLog = { water_ml: number; note: string };
+/** Times are "HH:MM"; the night is filed under the date you woke up. Quality 1 (poor) to 5 (great). */
+export type Sleep = { bed: string; wake: string; quality: number };
+
+export type DayLog = { water_ml: number; note: string; sleep: Sleep | null; steps: number | null; habits_done: number[] };
+
+export type Habit = { id: number; name: string; archived: boolean };
+export type HabitStatus = { id: number; name: string; done: boolean; streak: number };
+
+export type CardioType = "run" | "walk" | "cycle" | "swim" | "other";
+/** Distance is stored in km. */
+export type Cardio = { id: number; date: string; type: CardioType; minutes: number; distance_km: number | null; kcal: number | null; note: string | null };
+
+/** Lengths are stored in cm. */
+export type Measurement = { id: number; date: string; waist_cm: number | null; hips_cm: number | null; chest_cm: number | null; arm_cm: number | null; thigh_cm: number | null; body_fat_pct: number | null };
+export type MeasureKey = Exclude<keyof Measurement, "id" | "date">;
 
 export type FoodSource = "user-entered" | "open-food-facts";
 
@@ -25,8 +40,10 @@ export type TrendDay = {
   carbohydrates_g: number;
   fat_g: number;
   fiber_g: number;
-  workouts: number;
+  workouts: number; // strength + cardio sessions
   logged: boolean; // at least one meal that day
+  sleep_h: number | null;
+  steps: number | null;
 };
 
 export type Trends = {

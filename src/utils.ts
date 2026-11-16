@@ -27,3 +27,19 @@ export function shortDate(value: string): string {
 export function formatNumber(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value);
 }
+
+/** Hours slept between "HH:MM" bed and wake times (crossing midnight is handled). */
+export function sleepHours(bed: string, wake: string): number {
+  const minutes = (value: string) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5));
+  let span = minutes(wake) - minutes(bed);
+  if (span <= 0) span += 24 * 60;
+  return span / 60;
+}
+
+/** 7.25 -> "7h 15m"; 8 -> "8h". */
+export function formatHours(hours: number): string {
+  const whole = Math.floor(hours);
+  const minutes = Math.round((hours - whole) * 60);
+  if (minutes === 60) return `${whole + 1}h`;
+  return minutes ? `${whole}h ${minutes}m` : `${whole}h`;
+}

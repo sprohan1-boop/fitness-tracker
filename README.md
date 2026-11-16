@@ -44,9 +44,12 @@ Open `http://localhost:5173`. Production build: `npm run build`. For a sub-path 
 - Progress tab: food and workout streaks, daily averages and target adherence, calories chart, body weight with a 7-day trend, and per-exercise charts (heaviest set, volume).
 - Barcode scanning: fills in a food from Open Food Facts (only the barcode number is sent), marked "check against the label"; a barcode can also be typed.
 - Water tracking against an optional daily target, and a short note per day.
+- Sleep log (bed/wake time and quality, filed under the morning you woke), daily steps with an optional target, and a habits/supplements checklist with streaks.
+- Cardio sessions (run, walk, cycle, swim, other) with time, distance, pace and calories; they count toward weekly workouts and streaks.
+- Body measurements (waist, hips, chest, arm, thigh, body fat %) with trends on the Progress tab, plus sleep and steps charts.
 - Swipe left to delete with Undo (no confirmation pop-ups).
 - kg or lb for body weight and lifts (data is always stored in kg), and Auto / Dark / Light appearance. These are per-device settings, not part of backups.
 - Backups through the iOS share sheet with a 7-day reminder, and restore from a backup file.
 - Installable, offline-capable PWA that checks for updates whenever it's opened; charts and the scanner load on demand.
 
-Code: `src/api.ts` (data layer), `src/App.tsx` (main UI), `src/Progress.tsx` (Progress tab), `src/Barcode.tsx`, `src/RestTimer.tsx`, `src/Swipe.tsx`, `src/prefs.ts` (units/theme), `src/utils.ts`.
+Code: `src/api.ts` (data layer), `src/App.tsx` (main UI), `src/Health.tsx` (sleep, steps, habits, cardio), `src/Progress.tsx` + `src/Measurements.tsx` (Progress tab), `src/ui.tsx`, `src/Barcode.tsx`, `src/RestTimer.tsx`, `src/Swipe.tsx`, `src/prefs.ts` (units/theme), `src/utils.ts`.

@@ -1,12 +1,13 @@
-import { Dumbbell, Flame, Scale, Trash2, TrendingDown, TrendingUp, Trophy, Utensils } from "lucide-react";
+import { Dumbbell, Flame, Footprints, Moon, Scale, Trash2, TrendingDown, TrendingUp, Trophy, Utensils } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "./api";
 import { SwipeToDelete } from "./Swipe";
+import { MeasurementsSection } from "./Measurements";
 import { chartColors, fromKg, resolvedTheme, toKg, usePrefs } from "./prefs";
-import type { BodyWeight, ExercisePoint, ExerciseSummary, Trends } from "./types";
-import { addDays, dateLabel, formatNumber, localDate, shortDate } from "./utils";
+import type { BodyWeight, ExercisePoint, ExerciseSummary, Measurement, MeasureKey, Trends } from "./types";
+import { addDays, dateLabel, formatHours, formatNumber, localDate, shortDate } from "./utils";
 
 /** Chart colours and styles for the current theme. */
 function useChartTheme() {
@@ -29,13 +30,17 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
   const [trends, setTrends] = useState<Trends | null>(null);
   const [weights, setWeights] = useState<BodyWeight[]>([]);
   const [exercises, setExercises] = useState<ExerciseSummary[]>([]);
+  const [measurements, setMeasurements] = useState<Measurement[]>([]);
+  const [savingMeasure, setSavingMeasure] = useState(false);
+  const chartTheme = useChartTheme();
 
   const load = useCallback(async () => {
     try {
-      const [nextTrends, nextWeights, nextExercises] = await Promise.all([api.trends(localDate(), range), api.weights(), api.exercises()]);
+      const [nextTrends, nextWeights, nextExercises, nextMeasurements] = await Promise.all([api.trends(localDate(), range), api.weights(), api.exercises(), api.measurements()]);
       setTrends(nextTrends);
       setWeights(nextWeights);
       setExercises(nextExercises);
+      setMeasurements(nextMeasurements);
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : "Could not load your progress.");
     }
@@ -62,12 +67,87 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
 
       {trends && <TrendsSection trends={trends} range={range} />}
       <WeightSection weights={weights} range={range} onChanged={load} onError={onError} onDelete={(entry) => void onUndoableDelete(() => api.deleteWeight(entry.id), `Weigh-in from ${dateLabel(entry.date)} deleted.`)} />
+      {trends && <SleepStepsSection trends={trends} range={range} />}
+      <MeasurementsSection
+        measurements={measurements}
+        range={range}
+        theme={chartTheme}
+        busy={savingMeasure}
+        onSave={async (date: string, values: Record<MeasureKey, number | null>) => {
+          setSavingMeasure(true);
+          try {
+            await api.saveMeasurement(date, values);
+            await load();
+            return true;
+          } catch (cause) {
+            onError(cause instanceof Error ? cause.message : "Couldn't save measurements.");
+            return false;
+          } finally {
+            setSavingMeasure(false);
+          }
+        }}
+        onDelete={(entry) => void onUndoableDelete(() => api.deleteMeasurement(entry.id), `Measurements from ${dateLabel(entry.date)} deleted.`)}
+      />
       <ExerciseSection exercises={exercises} />
     </div>
   );
 }
 
 // ---------- trends ----------
+
+// ---------- sleep and steps ----------
+
+function SleepStepsSection({ trends, range }: { trends: Trends; range: Range }) {
+  const { COLORS, AXIS_TICK, TOOLTIP_STYLE } = useChartTheme();
+  const slept = trends.days.filter((day) => day.sleep_h !== null);
+  const walked = trends.days.filter((day) => day.steps !== null);
+  if (!slept.length && !walked.length) {
+    return (
+      <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
+        <div className="flex items-center gap-2"><Moon size={16} className="text-violet-300" /><h3 className="font-semibold">Sleep and steps</h3></div>
+        <p className="mt-4 rounded-2xl border border-dashed border-line p-5 text-center text-xs text-muted">Log sleep and steps on the dashboard to see trends here.</p>
+      </section>
+    );
+  }
+  const avgSleep = slept.length ? slept.reduce((sum, day) => sum + (day.sleep_h ?? 0), 0) / slept.length : null;
+  const avgSteps = walked.length ? walked.reduce((sum, day) => sum + (day.steps ?? 0), 0) / walked.length : null;
+  const stepTarget = trends.targets.steps;
+  const data = trends.days.map((day) => ({ label: shortDate(day.date), sleep: day.sleep_h, steps: day.steps }));
+  const chart = (key: "sleep" | "steps", color: string, unitLabel: string, reference: number | null) => (
+    <div className="mt-3 h-[150px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 6, right: 4, left: -18, bottom: 0 }}>
+          <CartesianGrid vertical={false} stroke={COLORS.grid} strokeDasharray="3 5" />
+          <XAxis dataKey="label" axisLine={false} tickLine={false} tick={AXIS_TICK} interval="preserveStartEnd" minTickGap={18} />
+          <YAxis axisLine={false} tickLine={false} tick={AXIS_TICK} width={44} tickFormatter={(tick: number) => formatNumber(tick)} />
+          <Tooltip cursor={{ fill: COLORS.cursor }} contentStyle={TOOLTIP_STYLE} formatter={(val) => [key === "sleep" ? formatHours(Number(val)) : `${formatNumber(Number(val))} ${unitLabel}`, key === "sleep" ? "Sleep" : "Steps"]} />
+          {reference !== null && <ReferenceLine y={reference} stroke={COLORS.amber} strokeDasharray="5 4" />}
+          <Bar dataKey={key} fill={color} radius={[4, 4, 0, 0]} maxBarSize={22} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+  return (
+    <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div>
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="flex items-center gap-2"><Moon size={16} className="text-violet-300" /><h3 className="font-semibold">Sleep</h3></div>
+            <p className="text-xs text-muted">{avgSleep === null ? "No nights logged" : <><b className="text-sm font-semibold text-white">{formatHours(avgSleep)}</b> average · {slept.length}/{range} nights</>}</p>
+          </div>
+          {slept.length > 0 && chart("sleep", COLORS.violet, "h", 8)}
+        </div>
+        <div>
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="flex items-center gap-2"><Footprints size={16} className="text-sky-300" /><h3 className="font-semibold">Steps</h3></div>
+            <p className="text-xs text-muted">{avgSteps === null ? "No days logged" : <><b className="text-sm font-semibold text-white">{formatNumber(Math.round(avgSteps))}</b> average{stepTarget ? ` · target ${formatNumber(stepTarget)}` : ""}</>}</p>
+          </div>
+          {walked.length > 0 && chart("steps", COLORS.sky, "steps", stepTarget)}
+        </div>
+      </div>
+    </section>
+  );
+}
 
 function TrendsSection({ trends, range }: { trends: Trends; range: Range }) {
   const logged = trends.days.filter((day) => day.logged);

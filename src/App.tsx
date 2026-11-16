@@ -12,6 +12,7 @@ import {
   Share,
   Dumbbell,
   Flame,
+  Footprints,
   Home,
   Droplet,
   Leaf,
@@ -39,13 +40,15 @@ import { RestTimer, unlockAudio } from "./RestTimer";
 const ProgressPage = lazy(() => import("./Progress").then((module) => ({ default: module.ProgressPage })));
 const WeekChart = lazy(() => import("./WeekChart"));
 import { SwipeToDelete } from "./Swipe";
+import { Field, FormError, ModalShell, NumberField } from "./ui";
+import { CardioCard, CardioForm, HabitsCard, HabitsManager, SleepCard, SleepForm, StepsCard, cardioLabel } from "./Health";
 import { BarcodeScanner, lookupBarcode } from "./Barcode";
 import { fromKg, setPrefs, toKg, usePrefs } from "./prefs";
 import type { ThemePref, Unit } from "./prefs";
-import type { BackupStatus, DashboardData, DayLog, FoodSource, Food, Meal, Serving, Targets, Workout } from "./types";
+import type { BackupStatus, Cardio, DashboardData, DayLog, FoodSource, HabitStatus, Food, Meal, Serving, Targets, Workout } from "./types";
 
 type Page = "dashboard" | "foods" | "workouts" | "progress" | "settings";
-type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | null;
+type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | null;
 type WorkoutBody = { name: string; date: string; sets: { exercise_name: string; set_number: number; reps: number; weight_kg: number }[] };
 
 const BACKUP_REMIND_DAYS = 7;
@@ -58,6 +61,7 @@ const EMPTY_TARGETS: Targets = {
   fiber_g: null,
   workouts_per_week: null,
   water_ml: null,
+  steps: null,
 };
 
 /** "Today", "Yesterday", or e.g. "Mon, Nov 10". */
@@ -126,7 +130,10 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState(localDate());
   const [recentFoodIds, setRecentFoodIds] = useState<number[]>([]);
   const [backup, setBackup] = useState<BackupStatus>({ last_backup_at: null, has_data: false });
-  const [dayLog, setDayLog] = useState<DayLog>({ water_ml: 0, note: "" });
+  const [dayLog, setDayLog] = useState<DayLog>({ water_ml: 0, note: "", sleep: null, steps: null, habits_done: [] });
+  const [habits, setHabits] = useState<HabitStatus[]>([]);
+  const [cardio, setCardio] = useState<Cardio[]>([]);
+  const [editingCardio, setEditingCardio] = useState<Cardio | null>(null);
   const [editingMeal, setEditingMeal] = useState<Meal | null>(null);
   const [undoMessage, setUndoMessage] = useState("");
   const [scanOnOpen, setScanOnOpen] = useState(false);
@@ -144,7 +151,10 @@ export default function App() {
       api.backupStatus(),
       api.day(selectedDate),
     ]);
+    const [nextHabits, nextCardio] = await Promise.all([api.habits(selectedDate), api.cardio()]);
     setDayLog(nextDay);
+    setHabits(nextHabits);
+    setCardio(nextCardio);
     setDashboard(nextDashboard);
     setFoods(nextFoods);
     setMeals(nextMeals);
@@ -178,7 +188,7 @@ export default function App() {
     return () => { mounted = false; };
   }, [refresh]);
 
-  async function runAction(action: () => Promise<unknown>, successMessage?: string, { undoable = false } = {}) {
+  async function runAction(action: () => Promise<unknown>, successMessage?: string, { undoable = false, keepOpen = false } = {}) {
     setBusy(true);
     setError("");
     setNotice("");
@@ -186,11 +196,14 @@ export default function App() {
     try {
       await action();
       await refresh();
-      setModal(null);
-      setEditingFood(null);
-      setEditingMeal(null);
-      setEditingWorkout(null);
-      setWorkoutTemplate(null);
+      if (!keepOpen) {
+        setModal(null);
+        setEditingFood(null);
+        setEditingMeal(null);
+        setEditingWorkout(null);
+        setWorkoutTemplate(null);
+        setEditingCardio(null);
+      }
       if (successMessage) (undoable ? setUndoMessage : setNotice)(successMessage);
       setDataVersion((version) => version + 1);
     } catch (cause) {
@@ -219,6 +232,20 @@ export default function App() {
     openModal("workout");
   }
 
+  function openCardioEditor(session: Cardio | null = null) {
+    setEditingCardio(session);
+    openModal("cardio");
+  }
+
+  /** Tick or untick instantly, then save and refresh streaks. */
+  function toggleHabit(habit: HabitStatus) {
+    setHabits((current) => current.map((item) => (item.id === habit.id ? { ...item, done: !item.done } : item)));
+    void api.toggleHabit(selectedDate, habit.id)
+      .then(() => api.habits(selectedDate))
+      .then(setHabits)
+      .catch(() => setError("Couldn't save that habit."));
+  }
+
   function openMealEditor(meal: Meal) {
     setEditingMeal(meal);
     openModal("editMeal");
@@ -230,6 +257,7 @@ export default function App() {
     setEditingMeal(null);
     setEditingWorkout(null);
     setWorkoutTemplate(null);
+    setEditingCardio(null);
   }
 
   const dayLabel = dayName(selectedDate);
@@ -292,6 +320,14 @@ export default function App() {
                 backup={backup}
                 onBackup={() => void runBackup()}
                 dayLog={dayLog}
+                habits={habits}
+                cardioToday={cardio.filter((session) => session.date === selectedDate)}
+                onLogSleep={() => openModal("sleep")}
+                onSaveSteps={(steps) => api.setSteps(selectedDate, steps).then(() => setDayLog((current) => ({ ...current, steps }))).catch(() => setError("Couldn't save steps."))}
+                onToggleHabit={toggleHabit}
+                onManageHabits={() => openModal("habits")}
+                onAddHabit={(name) => void runAction(() => api.addHabit(name), undefined, { keepOpen: true })}
+                onEditCardio={(session) => openCardioEditor(session)}
                 onAddWater={(ml) => void api.addWater(selectedDate, ml).then((water_ml) => setDayLog((current) => ({ ...current, water_ml }))).catch(() => setError("Couldn't save water."))}
                 onSaveNote={(note) => api.setNote(selectedDate, note).catch(() => setError("Couldn't save your note."))}
                 onLogMeal={() => openModal("meal")}
@@ -313,6 +349,10 @@ export default function App() {
             ) : page === "workouts" ? (
               <WorkoutsPage
                 workouts={workouts}
+                cardio={cardio}
+                onAddCardio={() => openCardioEditor()}
+                onEditCardio={(session) => openCardioEditor(session)}
+                onDeleteCardio={(session) => void runAction(() => api.deleteCardio(session.id), `${cardioLabel(session.type)} deleted.`, { undoable: true })}
                 onAdd={() => openWorkoutEditor()}
                 onEdit={(workout) => openWorkoutEditor({ edit: workout })}
                 onRepeat={(workout) => openWorkoutEditor({ template: workout })}
@@ -411,6 +451,35 @@ export default function App() {
           />
         </ModalShell>
       )}
+      {modal === "sleep" && (
+        <ModalShell title="Log sleep" eyebrow={`NIGHT BEFORE ${dayLabel.toUpperCase()}`} onClose={closeModal}>
+          <SleepForm initial={dayLog.sleep} previous={null} busy={busy} error={error} onSubmit={(sleep) => runAction(() => api.saveSleep(selectedDate, sleep), sleep ? "Sleep saved." : "Sleep cleared.")} />
+        </ModalShell>
+      )}
+      {modal === "habits" && (
+        <ModalShell title="Your habits" eyebrow="DAILY CHECKLIST" onClose={closeModal}>
+          <HabitsManager
+            habits={habits}
+            busy={busy}
+            error={error}
+            onAdd={(name) => void runAction(() => api.addHabit(name), undefined, { keepOpen: true })}
+            onRemove={(habit) => void runAction(() => api.removeHabit(habit.id), `"${habit.name}" removed.`, { undoable: true, keepOpen: true })}
+          />
+        </ModalShell>
+      )}
+      {modal === "cardio" && (
+        <ModalShell title={editingCardio ? "Edit cardio" : "Log cardio"} eyebrow={editingCardio ? "TRAINING LOG" : dayLabel.toUpperCase()} onClose={closeModal}>
+          <CardioForm
+            key={editingCardio?.id ?? "new"}
+            initial={editingCardio}
+            date={selectedDate}
+            busy={busy}
+            error={error}
+            onSubmit={(body) => runAction(() => api.saveCardio(body, editingCardio?.id), editingCardio ? "Session updated." : `${cardioLabel(body.type)} saved.`)}
+            onDelete={editingCardio ? () => runAction(() => api.deleteCardio(editingCardio.id), `${cardioLabel(editingCardio.type)} deleted.`, { undoable: true }) : undefined}
+          />
+        </ModalShell>
+      )}
       {modal === "targets" && (
         <ModalShell title="Set your targets" eyebrow="YOUR SETTINGS" onClose={closeModal}>
           <TargetsForm
@@ -462,6 +531,14 @@ function DashboardPage({
   backup,
   onBackup,
   dayLog,
+  habits,
+  cardioToday,
+  onLogSleep,
+  onSaveSteps,
+  onToggleHabit,
+  onManageHabits,
+  onAddHabit,
+  onEditCardio,
   onAddWater,
   onSaveNote,
   onLogMeal,
@@ -480,6 +557,14 @@ function DashboardPage({
   backup: BackupStatus;
   onBackup: () => void;
   dayLog: DayLog;
+  habits: HabitStatus[];
+  cardioToday: Cardio[];
+  onLogSleep: () => void;
+  onSaveSteps: (steps: number | null) => Promise<unknown>;
+  onToggleHabit: (habit: HabitStatus) => void;
+  onManageHabits: () => void;
+  onAddHabit: (name: string) => void;
+  onEditCardio: (session: Cardio) => void;
   onAddWater: (ml: number) => void;
   onSaveNote: (note: string) => Promise<unknown>;
   onLogMeal: () => void;
@@ -587,6 +672,15 @@ function DashboardPage({
         <p className="mt-4 flex items-start gap-2 text-[10px] leading-4 text-muted"><ShieldCheck size={13} className="mt-0.5 shrink-0 text-mint" /> Nutrition totals are calculated from the values you entered in your food library. They are not independently verified.</p>
       </section>
 
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <SleepCard sleep={dayLog.sleep} onLog={onLogSleep} />
+        <StepsCard key={date} steps={dayLog.steps} target={data.targets.steps} onSave={onSaveSteps} onSetTarget={onSetTargets} />
+      </div>
+
+      <div className="mt-4">
+        <HabitsCard habits={habits} onToggle={onToggleHabit} onManage={onManageHabits} onAdd={onAddHabit} />
+      </div>
+
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1.4fr]">
         <WaterCard water={dayLog.water_ml} target={data.targets.water_ml} onAdd={onAddWater} onSetTarget={onSetTargets} />
         <NoteCard key={date} date={date} initial={dayLog.note} onSave={onSaveNote} />
@@ -609,7 +703,7 @@ function DashboardPage({
             <div><h3 className="font-semibold">{isToday ? "Today's" : `${day}'s`} training</h3><p className="mt-1 text-xs text-muted">Tap a session to edit it</p></div>
             <button onClick={onLogWorkout} className="rounded-lg border border-line p-2 text-muted transition hover:border-mint/50 hover:text-mint" aria-label="Log a workout"><Plus size={16} /></button>
           </div>
-          {data.workouts_today.length === 0 ? (
+          {data.workouts_today.length === 0 && cardioToday.length === 0 ? (
             <EmptyState icon={Dumbbell} title="No workout logged yet" detail="Your training log will appear here." action="Log a workout" onClick={onLogWorkout} />
           ) : (
             <div className="space-y-3">
@@ -617,6 +711,13 @@ function DashboardPage({
                 <button key={workout.id} onClick={() => onEditWorkout(workout)} className="flex w-full items-center gap-3 rounded-2xl border border-line/80 bg-night/70 p-3.5 text-left transition hover:border-mint/40">
                   <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-mint/10 text-mint"><Dumbbell size={16} /></div>
                   <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{workout.name}</p><p className="mt-1 text-[10px] text-muted">{workout.sets.length} recorded sets</p></div>
+                  <Pencil size={14} className="text-muted" />
+                </button>
+              ))}
+              {cardioToday.map((session) => (
+                <button key={`cardio-${session.id}`} onClick={() => onEditCardio(session)} className="flex w-full items-center gap-3 rounded-2xl border border-line/80 bg-night/70 p-3.5 text-left transition hover:border-sky-300/40">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-300/10 text-sky-300"><Footprints size={16} /></div>
+                  <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{cardioLabel(session.type)}</p><p className="mt-1 text-[10px] text-muted">{session.minutes} min{session.kcal != null ? ` · ${formatNumber(session.kcal)} kcal` : ""}</p></div>
                   <Pencil size={14} className="text-muted" />
                 </button>
               ))}
@@ -1284,6 +1385,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
     fiber_g: targets.fiber_g == null ? "" : String(targets.fiber_g),
     workouts_per_week: targets.workouts_per_week == null ? "" : String(targets.workouts_per_week),
     water_ml: targets.water_ml == null ? "" : String(targets.water_ml),
+    steps: targets.steps == null ? "" : String(targets.steps),
   });
   const [validation, setValidation] = useState("");
   function submit(event: FormEvent) {
@@ -1300,6 +1402,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
       fiber_g: form.fiber_g.trim() ? Number(form.fiber_g) : null,
       workouts_per_week: form.workouts_per_week.trim() ? Number(form.workouts_per_week) : null,
       water_ml: form.water_ml.trim() ? Number(form.water_ml) : null,
+      steps: form.steps.trim() ? Number(form.steps) : null,
     });
   }
   const update = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
@@ -1314,6 +1417,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
         <NumberField label="Fiber · g" value={form.fiber_g} onChange={(v) => update("fiber_g", v)} />
         <NumberField label="Workouts · / week" value={form.workouts_per_week} onChange={(v) => update("workouts_per_week", v)} />
         <NumberField label="Water · ml / day" value={form.water_ml} onChange={(v) => update("water_ml", v)} />
+        <NumberField label="Steps · / day" value={form.steps} onChange={(v) => update("steps", v)} />
       </div>
       {(validation || error) && <FormError message={validation || error} />}
       <button disabled={busy} className="button-primary w-full disabled:opacity-60">{busy ? "Saving…" : "Save targets"}</button>
@@ -1321,8 +1425,9 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
   );
 }
 
-function WorkoutsPage({ workouts, onAdd, onEdit, onRepeat, onDelete }: { workouts: Workout[]; onAdd: () => void; onEdit: (workout: Workout) => void; onRepeat: (workout: Workout) => void; onDelete: (workout: Workout) => void }) {
+function WorkoutsPage({ workouts, cardio, onAdd, onEdit, onRepeat, onDelete, onAddCardio, onEditCardio, onDeleteCardio }: { workouts: Workout[]; cardio: Cardio[]; onAdd: () => void; onEdit: (workout: Workout) => void; onRepeat: (workout: Workout) => void; onDelete: (workout: Workout) => void; onAddCardio: () => void; onEditCardio: (session: Cardio) => void; onDeleteCardio: (session: Cardio) => void }) {
   const { unit } = usePrefs();
+  const [view, setView] = useState<"strength" | "cardio">("strength");
   const personalRecords = useMemo(() => {
     const records = new Map<string, number>();
     workouts.forEach((workout) => workout.sets.forEach((set) => records.set(set.exercise_name, Math.max(records.get(set.exercise_name) ?? 0, set.weight_kg))));
@@ -1330,7 +1435,19 @@ function WorkoutsPage({ workouts, onAdd, onEdit, onRepeat, onDelete }: { workout
   }, [workouts]);
   return (
     <div className="mx-auto max-w-[1050px]">
-      <PageIntro eyebrow="TRAINING JOURNAL" title="Workouts" detail="Record completed sets. Repeat a past session to start from last time's numbers." action={<button onClick={onAdd} className="button-primary"><Plus size={16} /> Log workout</button>} />
+      <PageIntro eyebrow="TRAINING JOURNAL" title="Workouts" detail="Strength sets and cardio sessions. Both count toward your weekly target." action={<button onClick={view === "strength" ? onAdd : onAddCardio} className="button-primary !px-3"><Plus size={16} /> {view === "strength" ? "Workout" : "Cardio"}</button>} />
+      <div className="mb-4 flex rounded-xl border border-line bg-panel p-1">
+        {(["strength", "cardio"] as const).map((option) => (
+          <button key={option} onClick={() => setView(option)} className={`flex-1 rounded-lg py-2 text-xs font-medium capitalize transition ${view === option ? "bg-mint text-night" : "text-muted"}`}>
+            {option} · {option === "strength" ? workouts.length : cardio.length}
+          </button>
+        ))}
+      </div>
+      {view === "cardio" ? (
+        cardio.length === 0 ? <EmptyState icon={Footprints} title="No cardio yet" detail="Log runs, walks, rides or swims with time, distance and calories." action="Log cardio" onClick={onAddCardio} /> : (
+          <div className="space-y-3">{cardio.map((session) => <CardioCard key={session.id} session={session} onEdit={() => onEditCardio(session)} onDelete={() => onDeleteCardio(session)} />)}</div>
+        )
+      ) : (<>
       {personalRecords.length > 0 && (
         <section className="mb-5 rounded-3xl border border-line bg-panel p-5">
           <div className="mb-4 flex items-center gap-2"><Target size={15} className="text-lime" /><h3 className="text-sm font-semibold">Top recorded weights</h3><span className="text-[10px] text-muted">from your logged sets</span></div>
@@ -1342,6 +1459,7 @@ function WorkoutsPage({ workouts, onAdd, onEdit, onRepeat, onDelete }: { workout
           {workouts.map((workout) => <WorkoutCard key={workout.id} workout={workout} onEdit={() => onEdit(workout)} onRepeat={() => onRepeat(workout)} onDelete={() => onDelete(workout)} />)}
         </div>
       )}
+      </>)}
     </div>
   );
 }
@@ -1402,6 +1520,7 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
     ["Fiber", targets.fiber_g == null ? "Not set" : `${formatNumber(targets.fiber_g)} g`],
     ["Workouts", targets.workouts_per_week == null ? "Not set" : `${targets.workouts_per_week} / week`],
     ["Water", targets.water_ml == null ? "Not set" : `${formatNumber(targets.water_ml)} ml / day`],
+    ["Steps", targets.steps == null ? "Not set" : `${formatNumber(targets.steps)} / day`],
   ];
   return (
     <div className="mx-auto max-w-[850px]">
@@ -1470,34 +1589,8 @@ function EmptyState({ icon: Icon, title, detail, action, onClick }: { icon: type
   );
 }
 
-function ModalShell({ title, eyebrow, onClose, children }: { title: string; eyebrow: string; onClose: () => void; children: ReactNode }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="relative max-h-[calc(100dvh_-_env(safe-area-inset-top)_-_12px)] w-full overflow-y-auto overflow-x-hidden overscroll-contain rounded-t-3xl border border-line bg-panel p-5 pb-[max(env(safe-area-inset-bottom),20px)] shadow-2xl sm:max-h-[94dvh] sm:max-w-[540px] sm:rounded-3xl sm:p-6">
-        <div className="mb-5 flex items-start justify-between">
-          <div><p className="text-[9px] font-bold tracking-[.2em] text-lime">{eyebrow}</p><h2 className="mt-1.5 text-xl font-semibold">{title}</h2></div>
-          <button onClick={onClose} className="rounded-xl border border-line p-2 text-muted transition hover:bg-panel-raised hover:text-white" aria-label="Close"><X size={16} /></button>
-        </div>
-        {children}
-      </section>
-    </div>
-  );
-}
-
-function Field({ label, required, children }: { label: string; required?: boolean; children: ReactNode }) {
-  return <label className="block"><span className="mb-1.5 block text-[11px] font-medium text-zinc-300">{label}{required && <span className="ml-1 text-red-300">*</span>}</span>{children}</label>;
-}
-
-function NumberField({ label, value, onChange, required }: { label: string; value: string; onChange: (value: string) => void; required?: boolean }) {
-  return <Field label={label} required={required}><input type="number" min="0" step="any" required={required} value={value} onChange={(event) => onChange(event.target.value)} placeholder={required ? "Required" : "Not set"} className="input-dark" /></Field>;
-}
-
 function PreviewMetric({ label, value }: { label: string; value: string }) {
   return <div><p className="text-[9px] text-muted">{label}</p><p className="mt-1 text-xs font-semibold">{value}</p></div>;
-}
-
-function FormError({ message }: { message: string }) {
-  return <p role="alert" className="rounded-xl border border-red-300/15 bg-red-300/5 px-3 py-2 text-[11px] leading-5 text-red-200">{message}</p>;
 }
 
 function Alert({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
