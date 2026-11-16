@@ -1,4 +1,4 @@
-import { Dumbbell, Flame, Footprints, Moon, Scale, Trash2, TrendingDown, TrendingUp, Trophy, Utensils } from "lucide-react";
+import { Dumbbell, Flame, Gauge, Footprints, Moon, Scale, Trash2, TrendingDown, TrendingUp, Trophy, Utensils } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -6,7 +6,7 @@ import { api } from "./api";
 import { SwipeToDelete } from "./Swipe";
 import { MeasurementsSection } from "./Measurements";
 import { chartColors, fromKg, resolvedTheme, toKg, usePrefs } from "./prefs";
-import type { BodyWeight, ExercisePoint, ExerciseSummary, Measurement, MeasureKey, Trends } from "./types";
+import type { BodyWeight, EnergyEstimate, ExercisePoint, ExerciseSummary, Measurement, MeasureKey, Trends } from "./types";
 import { addDays, dateLabel, formatHours, formatNumber, localDate, shortDate } from "./utils";
 
 /** Chart colours and styles for the current theme. */
@@ -31,12 +31,14 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
   const [weights, setWeights] = useState<BodyWeight[]>([]);
   const [exercises, setExercises] = useState<ExerciseSummary[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
+  const [energy, setEnergy] = useState<EnergyEstimate | null>(null);
   const [savingMeasure, setSavingMeasure] = useState(false);
   const chartTheme = useChartTheme();
 
   const load = useCallback(async () => {
     try {
-      const [nextTrends, nextWeights, nextExercises, nextMeasurements] = await Promise.all([api.trends(localDate(), range), api.weights(), api.exercises(), api.measurements()]);
+      const [nextTrends, nextWeights, nextExercises, nextMeasurements, nextEnergy] = await Promise.all([api.trends(localDate(), range), api.weights(), api.exercises(), api.measurements(), api.energyEstimate(localDate())]);
+      setEnergy(nextEnergy);
       setTrends(nextTrends);
       setWeights(nextWeights);
       setExercises(nextExercises);
@@ -67,6 +69,7 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
 
       {trends && <TrendsSection trends={trends} range={range} />}
       <WeightSection weights={weights} range={range} onChanged={load} onError={onError} onDelete={(entry) => void onUndoableDelete(() => api.deleteWeight(entry.id), `Weigh-in from ${dateLabel(entry.date)} deleted.`)} />
+      {energy && <EnergySection energy={energy} calorieTarget={trends?.targets.calories ?? null} />}
       {trends && <SleepStepsSection trends={trends} range={range} />}
       <MeasurementsSection
         measurements={measurements}
@@ -94,6 +97,51 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
 }
 
 // ---------- trends ----------
+
+// ---------- measured calorie burn ----------
+
+function EnergySection({ energy, calorieTarget }: { energy: EnergyEstimate; calorieTarget: number | null }) {
+  const { unit } = usePrefs();
+  const perWeek = (kg: number) => `${kg > 0 ? "+" : ""}${formatNumber(Math.round(fromKg(kg, unit) * 100) / 100)} ${unit}/week`;
+  return (
+    <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
+      <div className="flex items-center gap-2"><Gauge size={16} className="text-lime" /><h3 className="font-semibold">Your real daily burn</h3></div>
+      {energy.ready ? (
+        <>
+          <p className="mt-3"><span className="text-3xl font-semibold tracking-tight">{formatNumber(energy.tdee)}</span> <span className="text-sm text-muted">kcal / day</span></p>
+          <p className="mt-1 text-[11px] leading-5 text-muted">
+            You ate {formatNumber(energy.intake_avg)} kcal on average while your weight trend was {perWeek(energy.kg_per_week)}, over {energy.days_logged} logged days and {energy.weighins} weigh-ins in the last {energy.window_days} days.
+          </p>
+          {calorieTarget !== null && (
+            <p className="mt-3 rounded-2xl bg-night p-3 text-xs">
+              {Math.abs(((calorieTarget - energy.tdee) * 7) / 7700) < 0.05
+                ? <>Your {formatNumber(calorieTarget)} kcal target is about maintenance: <b className="font-semibold">expect roughly the same weight</b>.</>
+                : <>At your {formatNumber(calorieTarget)} kcal target, expect about <b className="font-semibold">{perWeek(((calorieTarget - energy.tdee) * 7) / 7700)}</b>.</>}
+            </p>
+          )}
+          <p className="mt-2 text-[10px] leading-4 text-muted">Assumes the days you logged are complete. Gets more accurate the more consistently you log food and weigh in.</p>
+        </>
+      ) : (
+        <>
+          <p className="mt-2 text-xs leading-5 text-muted">Worked out from what you eat and how your weight changes, which beats any formula. It needs, within the last {energy.window_days} days:</p>
+          <div className="mt-3 space-y-2 text-xs">
+            <Requirement done={energy.days_logged >= 14} label={`14 days of food logged (${energy.days_logged} so far)`} />
+            <Requirement done={energy.weighins >= 2 && energy.weigh_span_days >= 10} label={`Weigh-ins at least 10 days apart (${energy.weighins} weigh-in${energy.weighins === 1 ? "" : "s"}${energy.weighins >= 2 ? `, ${Math.round(energy.weigh_span_days)} days apart` : ""})`} />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function Requirement({ done, label }: { done: boolean; label: string }) {
+  return (
+    <p className="flex items-center gap-2">
+      <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] ${done ? "bg-lime text-night" : "border border-zinc-500"}`}>{done ? "✓" : ""}</span>
+      <span className={done ? "text-zinc-300" : "text-muted"}>{label}</span>
+    </p>
+  );
+}
 
 // ---------- sleep and steps ----------
 

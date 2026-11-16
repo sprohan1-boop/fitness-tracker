@@ -1,7 +1,7 @@
 // On-device data layer. Everything is stored in this browser's IndexedDB on the phone:
 // no server, works offline. Mirrors the calculations the old FastAPI backend did.
 import { sleepHours } from "./utils";
-import type { BackupStatus, BodyWeight, Cardio, CardioType, DayLog, FoodSource, Habit, HabitStatus, Measurement, MeasureKey, Sleep, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
+import type { BackupStatus, BodyWeight, Cardio, EnergyEstimate, Fast, Profile, Recipe, CardioType, DayLog, FoodSource, Habit, HabitStatus, Measurement, MeasureKey, Sleep, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 type MealBody = { food_id: number; date: string; meal_type: string; portion_g: number };
@@ -15,7 +15,7 @@ type StoredMeal = Meal & { created_at: number };
 
 type State = {
   version: 1;
-  next_id: { food: number; meal: number; workout: number; set: number; weight: number; habit: number; cardio: number; measure: number };
+  next_id: { food: number; meal: number; workout: number; set: number; weight: number; habit: number; cardio: number; measure: number; fast: number };
   targets: Targets | null;
   foods: Food[];
   meals: StoredMeal[];
@@ -25,6 +25,8 @@ type State = {
   habits: Habit[];
   cardio: Cardio[];
   measurements: Measurement[];
+  profile: Profile | null;
+  fasts: Fast[];
   last_backup_at: number | null;
 };
 
@@ -40,6 +42,8 @@ export type ExportFile = {
   habits?: Habit[];
   cardio?: Cardio[];
   measurements?: Measurement[];
+  profile?: Profile | null;
+  fasts?: Fast[];
 };
 
 const DB_NAME = "fitness-tracker";
@@ -47,7 +51,7 @@ const STORE = "kv";
 const KEY = "state";
 
 function emptyState(): State {
-  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1, habit: 1, cardio: 1, measure: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, habits: [], cardio: [], measurements: [], last_backup_at: null };
+  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1, habit: 1, cardio: 1, measure: 1, fast: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, habits: [], cardio: [], measurements: [], profile: null, fasts: [], last_backup_at: null };
 }
 
 // Brings data saved by older versions of the app up to the current shape.
@@ -63,6 +67,9 @@ function migrate(state: State): State {
   state.next_id.habit ??= nextAfter(state.habits);
   state.next_id.cardio ??= nextAfter(state.cardio);
   state.next_id.measure ??= nextAfter(state.measurements);
+  state.profile ??= null;
+  state.fasts ??= [];
+  state.next_id.fast ??= nextAfter(state.fasts);
   if (state.targets) {
     state.targets.water_ml ??= null;
     state.targets.steps ??= null;
@@ -151,7 +158,15 @@ function cleanFood(body: FoodBody): FoodBody {
     return { label, grams: serving.grams };
   });
   if (servings.length > 10) fail("Add up to 10 servings per food.");
-  return { ...body, name, brand: body.brand?.trim() || null, notes: body.notes?.trim() || null, servings };
+  const extra = (value: number | null | undefined) => {
+    if (value === null || value === undefined) return null;
+    if (!isNum(value) || value < 0) fail("Sugar, saturated fat and sodium must be non-negative numbers, or left blank.");
+    return value;
+  };
+  return {
+    ...body, name, brand: body.brand?.trim() || null, notes: body.notes?.trim() || null, servings,
+    sugar_g_per_100g: extra(body.sugar_g_per_100g), sat_fat_g_per_100g: extra(body.sat_fat_g_per_100g), sodium_mg_per_100g: extra(body.sodium_mg_per_100g),
+  };
 }
 
 function cleanWorkout(body: WorkoutBody, nextSetId: () => number): Omit<Workout, "id"> {
@@ -201,6 +216,12 @@ const CARDIO_TYPES: CardioType[] = ["run", "walk", "cycle", "swim", "other"];
 const MEASURE_KEYS: MeasureKey[] = ["waist_cm", "hips_cm", "chest_cm", "arm_cm", "thigh_cm", "body_fat_pct"];
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+/** Sugar / saturated fat / sodium for a portion; null when the food doesn't have the value. */
+function extrasFor(food: Food, factor: number) {
+  const scale = (value: number | null | undefined) => (value == null ? null : value * factor);
+  return { sugar_g: scale(food.sugar_g_per_100g), sat_fat_g: scale(food.sat_fat_g_per_100g), sodium_mg: scale(food.sodium_mg_per_100g) };
+}
+
 const publicMeal = ({ created_at: _created, ...meal }: StoredMeal): Meal => meal;
 
 // ---------- API (same shape the UI used with the server) ----------
@@ -217,6 +238,10 @@ export const api = {
       carbohydrates_g: sum(dayMeals, "carbohydrates_g"),
       fat_g: sum(dayMeals, "fat_g"),
       fiber_g: sum(dayMeals, "fiber_g"),
+      sugar_g: dayMeals.reduce((total, meal) => total + (meal.sugar_g ?? 0), 0),
+      sat_fat_g: dayMeals.reduce((total, meal) => total + (meal.sat_fat_g ?? 0), 0),
+      sodium_mg: dayMeals.reduce((total, meal) => total + (meal.sodium_mg ?? 0), 0),
+      extras_known: dayMeals.some((meal) => meal.sugar_g != null || meal.sat_fat_g != null || meal.sodium_mg != null),
     };
     const targets = state.targets ?? EMPTY_TARGETS;
     const remaining: Targets = { ...EMPTY_TARGETS };
@@ -317,6 +342,7 @@ export const api = {
         carbohydrates_g: food.carbohydrates_g_per_100g * factor,
         fat_g: food.fat_g_per_100g * factor,
         fiber_g: food.fiber_g_per_100g * factor,
+        ...extrasFor(food, factor),
         created_at: Date.now(),
       };
       state.meals.push(meal);
@@ -352,6 +378,7 @@ export const api = {
       if (!isNum(body.portion_g) || body.portion_g <= 0 || body.portion_g > 10000) fail("Enter a portion between 0 and 10,000 g.");
       const ratio = body.portion_g / meal.portion_g;
       for (const key of ["calories", "protein_g", "carbohydrates_g", "fat_g", "fiber_g"] as const) meal[key] *= ratio;
+      for (const key of ["sugar_g", "sat_fat_g", "sodium_mg"] as const) if (meal[key] != null) meal[key] = (meal[key] as number) * ratio;
       meal.portion_g = body.portion_g;
       meal.meal_type = body.meal_type;
       meal.date = body.date;
@@ -436,6 +463,153 @@ export const api = {
     mutate((state) => {
       editDay(state, date).note = note.slice(0, 2000);
     }),
+
+  // ---------- recipes ----------
+
+  /**
+   * Saves a recipe as a food: nutrition per 100 g is worked out from the ingredients (using their
+   * current values), with a "1 portion" serving. Logging it then works like any other food.
+   */
+  saveRecipe: (body: { name: string; portions: number; ingredients: { food_id: number; grams: number }[] }, id?: number) =>
+    mutate((state) => {
+      const name = body.name.trim();
+      if (!name || name.length > 120) fail("Recipe name must be 1–120 characters.");
+      if (!Number.isInteger(body.portions) || body.portions < 1 || body.portions > 50) fail("Portions must be a whole number from 1 to 50.");
+      if (body.ingredients.length < 1 || body.ingredients.length > 40) fail("Add between 1 and 40 ingredients.");
+      const parts = body.ingredients.map((item) => {
+        if (item.food_id === id) fail("A recipe can't include itself.");
+        const food = state.foods.find((candidate) => candidate.id === item.food_id) ?? fail("An ingredient is no longer in your food library.");
+        if (!isNum(item.grams) || item.grams <= 0 || item.grams > 20000) fail(`Enter grams for ${food.name}.`);
+        return { food, grams: item.grams };
+      });
+      const total = parts.reduce((sum, part) => sum + part.grams, 0);
+      const per100 = (pick: (food: Food) => number) => parts.reduce((sum, part) => sum + pick(part.food) * part.grams / 100, 0) * 100 / total;
+      // Extras only when every ingredient has the value, so totals are never silently low.
+      const extra = (pick: (food: Food) => number | null | undefined) => (parts.every((part) => pick(part.food) != null) ? per100((food) => pick(food) as number) : null);
+      const round = (value: number) => Math.round(value * 10) / 10;
+      const recipe: Recipe = { ingredients: parts.map((part) => ({ food_id: part.food.id, name: part.food.name, grams: part.grams })), portions: body.portions };
+      const portion = { label: "1 portion", grams: Math.round(total / body.portions) };
+      const values = {
+        name, brand: null, preparation: "cooked" as const,
+        calories_per_100g: round(per100((food) => food.calories_per_100g)),
+        protein_g_per_100g: round(per100((food) => food.protein_g_per_100g)),
+        carbohydrates_g_per_100g: round(per100((food) => food.carbohydrates_g_per_100g)),
+        fat_g_per_100g: round(per100((food) => food.fat_g_per_100g)),
+        fiber_g_per_100g: round(per100((food) => food.fiber_g_per_100g)),
+        sugar_g_per_100g: (() => { const v = extra((food) => food.sugar_g_per_100g); return v == null ? null : round(v); })(),
+        sat_fat_g_per_100g: (() => { const v = extra((food) => food.sat_fat_g_per_100g); return v == null ? null : round(v); })(),
+        sodium_mg_per_100g: (() => { const v = extra((food) => food.sodium_mg_per_100g); return v == null ? null : Math.round(v); })(),
+        notes: `Recipe · ${parts.length} ingredient${parts.length === 1 ? "" : "s"} · ${Math.round(total)} g total`,
+        recipe,
+      };
+      if (id === undefined) {
+        const food: Food = { ...values, id: state.next_id.food++, servings: [portion], source: "recipe", is_verified: false };
+        state.foods.push(food);
+        return food;
+      }
+      const index = state.foods.findIndex((food) => food.id === id);
+      if (index < 0) fail("Recipe not found.");
+      const others = state.foods[index].servings.filter((serving) => serving.label !== "1 portion");
+      state.foods[index] = { ...state.foods[index], ...values, servings: [portion, ...others].slice(0, 10) };
+      return state.foods[index];
+    }),
+
+  /** Copies every meal logged on `from` to `to` (keeping their saved nutrition). Undoable. */
+  copyMeals: (from: string, to: string) =>
+    mutate((state) => {
+      const source = state.meals.filter((meal) => meal.date === from).sort((a, b) => a.created_at - b.created_at);
+      if (!source.length) fail("Nothing was logged that day.");
+      const now = Date.now();
+      source.forEach((meal, index) => state.meals.push({ ...meal, id: state.next_id.meal++, date: to, created_at: now + index }));
+      return source.length;
+    }, { undoable: true }),
+
+  // ---------- profile (for the target calculator) ----------
+
+  async profile(): Promise<Profile | null> {
+    return (await load()).profile;
+  },
+
+  saveProfile: (profile: Profile) =>
+    mutate((state) => {
+      const year = new Date().getFullYear();
+      if (!["male", "female"].includes(profile.sex)) fail("Choose a sex for the formula.");
+      if (!Number.isInteger(profile.birth_year) || profile.birth_year < year - 100 || profile.birth_year > year - 13) fail("Enter a birth year (age 13–100).");
+      if (!isNum(profile.height_cm) || profile.height_cm < 100 || profile.height_cm > 250) fail("Height must be between 100 and 250 cm.");
+      state.profile = { ...profile, height_cm: Math.round(profile.height_cm * 10) / 10 };
+    }),
+
+  // ---------- fasting ----------
+
+  async fasting(): Promise<{ active: Fast | null; recent: Fast[] }> {
+    const fasts = (await load()).fasts;
+    return {
+      active: fasts.find((fast) => fast.end === null) ?? null,
+      recent: fasts.filter((fast) => fast.end !== null).sort((a, b) => (b.end as number) - (a.end as number)).slice(0, 7),
+    };
+  },
+
+  startFast: (goal_h: number, start = Date.now()) =>
+    mutate((state) => {
+      if (state.fasts.some((fast) => fast.end === null)) fail("A fast is already running.");
+      if (!isNum(goal_h) || goal_h < 1 || goal_h > 72) fail("Choose a goal between 1 and 72 hours.");
+      if (start > Date.now() + 60_000 || start < Date.now() - 72 * 3_600_000) fail("The start time must be within the last 3 days.");
+      state.fasts.push({ id: state.next_id.fast++, start, end: null, goal_h });
+    }),
+
+  /** Change the running fast's start time or goal. */
+  adjustFast: (change: { start?: number; goal_h?: number }) =>
+    mutate((state) => {
+      const fast = state.fasts.find((item) => item.end === null) ?? fail("No fast is running.");
+      if (change.start !== undefined) {
+        if (change.start > Date.now() || change.start < Date.now() - 72 * 3_600_000) fail("The start time must be within the last 3 days.");
+        fast.start = change.start;
+      }
+      if (change.goal_h !== undefined) fast.goal_h = change.goal_h;
+    }),
+
+  endFast: () =>
+    mutate((state) => {
+      const fast = state.fasts.find((item) => item.end === null) ?? fail("No fast is running.");
+      fast.end = Date.now();
+    }),
+
+  deleteFast: (id: number) =>
+    mutate((state) => {
+      state.fasts = state.fasts.filter((fast) => fast.id !== id);
+    }, { undoable: true }),
+
+  // ---------- measured calorie burn ----------
+
+  /**
+   * Estimates your real daily burn over the 28 days before `today`: average logged intake minus
+   * the energy implied by your weight trend (about 7,700 kcal per kg). Needs 14+ logged days and
+   * weigh-ins spanning 10+ days. Assumes the days you logged are complete.
+   */
+  async energyEstimate(today: string): Promise<EnergyEstimate> {
+    const state = await load();
+    const window_days = 28;
+    const endMs = toUtc(today) - DAY_MS; // today is usually still incomplete
+    const startMs = endMs - (window_days - 1) * DAY_MS;
+    const inWindow = (date: string) => toUtc(date) >= startMs && toUtc(date) <= endMs;
+    const intakeByDay = new Map<string, number>();
+    for (const meal of state.meals) if (inWindow(meal.date)) intakeByDay.set(meal.date, (intakeByDay.get(meal.date) ?? 0) + meal.calories);
+    const weighins = state.weights.filter((entry) => inWindow(entry.date)).sort((a, b) => a.date.localeCompare(b.date));
+    const days_logged = intakeByDay.size;
+    const span = weighins.length >= 2 ? (toUtc(weighins[weighins.length - 1].date) - toUtc(weighins[0].date)) / DAY_MS : 0;
+    if (days_logged < 14 || weighins.length < 2 || span < 10) {
+      return { ready: false, days_logged, weighins: weighins.length, weigh_span_days: span, window_days };
+    }
+    // Weight trend: least-squares slope in kg/day, which smooths out day-to-day water swings.
+    const xs = weighins.map((entry) => toUtc(entry.date) / DAY_MS);
+    const ys = weighins.map((entry) => entry.weight_kg);
+    const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+    const slope = xs.reduce((acc, x, i) => acc + (x - mx) * (ys[i] - my), 0) / xs.reduce((acc, x) => acc + (x - mx) ** 2, 0);
+    const intake_avg = [...intakeByDay.values()].reduce((a, b) => a + b, 0) / days_logged;
+    const tdee = intake_avg - slope * 7700;
+    return { ready: true, tdee: Math.round(tdee / 10) * 10, intake_avg: Math.round(intake_avg), kg_per_week: Math.round(slope * 7 * 100) / 100, days_logged, weighins: weighins.length, window_days };
+  },
 
   // ---------- sleep and steps ----------
 
@@ -658,6 +832,8 @@ export const api = {
       habits: state.habits,
       cardio: [...state.cardio].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id),
       measurements: [...state.measurements].sort((a, b) => a.date.localeCompare(b.date)),
+      profile: state.profile,
+      fasts: state.fasts,
     };
   },
 
@@ -696,6 +872,8 @@ export const api = {
       state.habits = (Array.isArray(data.habits) ? data.habits : []).filter((habit) => habit && isNum(habit.id) && typeof habit.name === "string").map((habit) => ({ id: habit.id, name: habit.name.slice(0, 60), archived: Boolean(habit.archived) }));
       state.cardio = (Array.isArray(data.cardio) ? data.cardio : []).filter((session) => session && isNum(session.id) && typeof session.date === "string" && isNum(session.minutes) && CARDIO_TYPES.includes(session.type));
       state.measurements = (Array.isArray(data.measurements) ? data.measurements : []).filter((entry) => entry && isNum(entry.id) && typeof entry.date === "string");
+      state.profile = data.profile && typeof data.profile === "object" && isNum(data.profile.height_cm) ? data.profile : null;
+      state.fasts = (Array.isArray(data.fasts) ? data.fasts : []).filter((fast) => fast && isNum(fast.id) && isNum(fast.start) && isNum(fast.goal_h));
       state.last_backup_at = Date.now(); // the file just restored from is a backup
       state.next_id = {
         food: maxId(foods.map((food) => food.id)),
@@ -706,6 +884,7 @@ export const api = {
         habit: maxId(state.habits.map((habit) => habit.id)),
         cardio: maxId(state.cardio.map((session) => session.id)),
         measure: maxId(state.measurements.map((entry) => entry.id)),
+        fast: maxId(state.fasts.map((fast) => fast.id)),
       };
       return { foods: foods.length, meals: meals.length, workouts: workouts.length };
     }),

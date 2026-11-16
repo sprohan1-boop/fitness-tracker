@@ -14,6 +14,9 @@ export type FoodPrefill = {
   carbs: number | null;
   fat: number | null;
   fiber: number | null;
+  sugar: number | null;
+  satFat: number | null;
+  sodiumMg: number | null;
   serving: Serving | null;
 };
 
@@ -48,6 +51,10 @@ export async function lookupBarcode(barcode: string): Promise<FoodPrefill | null
     carbs: num(n["carbohydrates_100g"]),
     fat: num(n["fat_100g"]),
     fiber: num(n["fiber_100g"]),
+    sugar: num(n["sugars_100g"]),
+    satFat: num(n["saturated-fat_100g"]),
+    // Open Food Facts lists sodium in grams per 100 g.
+    sodiumMg: num(n["sodium_100g"]) === null ? null : Math.round((num(n["sodium_100g"]) as number) * 1000),
     serving: servingGrams ? { label: "1 serving", grams: servingGrams } : null,
   };
 }

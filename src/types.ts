@@ -29,7 +29,19 @@ export type Cardio = { id: number; date: string; type: CardioType; minutes: numb
 export type Measurement = { id: number; date: string; waist_cm: number | null; hips_cm: number | null; chest_cm: number | null; arm_cm: number | null; thigh_cm: number | null; body_fat_pct: number | null };
 export type MeasureKey = Exclude<keyof Measurement, "id" | "date">;
 
-export type FoodSource = "user-entered" | "open-food-facts";
+export type FoodSource = "user-entered" | "open-food-facts" | "recipe";
+
+export type ActivityLevel = "sedentary" | "light" | "moderate" | "very" | "extra";
+export type Goal = "lose" | "lose_slow" | "maintain" | "gain";
+export type Profile = { sex: "male" | "female"; birth_year: number; height_cm: number; activity: ActivityLevel; goal: Goal };
+
+/** Times are epoch milliseconds; end is null while the fast is running. */
+export type Fast = { id: number; start: number; end: number | null; goal_h: number };
+
+/** Daily calorie burn measured from your own food log and weight trend. */
+export type EnergyEstimate =
+  | { ready: true; tdee: number; intake_avg: number; kg_per_week: number; days_logged: number; weighins: number; window_days: number }
+  | { ready: false; days_logged: number; weighins: number; weigh_span_days: number; window_days: number };
 
 export type BodyWeight = { id: number; date: string; weight_kg: number };
 
@@ -71,7 +83,15 @@ export type Food = {
   notes: string | null;
   source: string;
   is_verified: boolean;
+  // Optional extras (null = unknown). Sodium in mg.
+  sugar_g_per_100g?: number | null;
+  sat_fat_g_per_100g?: number | null;
+  sodium_mg_per_100g?: number | null;
+  /** Set when this food is a recipe built from other foods. */
+  recipe?: Recipe | null;
 };
+
+export type Recipe = { ingredients: { food_id: number; name: string; grams: number }[]; portions: number };
 
 export type Meal = {
   id: number;
@@ -86,6 +106,9 @@ export type Meal = {
   carbohydrates_g: number;
   fat_g: number;
   fiber_g: number;
+  sugar_g?: number | null;
+  sat_fat_g?: number | null;
+  sodium_mg?: number | null;
 };
 
 export type WorkoutSet = {
@@ -112,6 +135,10 @@ export type DashboardData = {
     carbohydrates_g: number;
     fat_g: number;
     fiber_g: number;
+    sugar_g: number;
+    sat_fat_g: number;
+    sodium_mg: number;
+    extras_known: boolean; // at least one meal that day has sugar/sat fat/sodium values
   };
   targets: Targets;
   remaining: Targets;

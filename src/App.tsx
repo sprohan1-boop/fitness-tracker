@@ -4,7 +4,9 @@ import {
   ArrowUpRight,
   BarChart3,
   CalendarDays,
+  ChefHat,
   Check,
+  Copy,
   ChevronLeft,
   ChevronRight,
   Pencil,
@@ -41,14 +43,15 @@ const ProgressPage = lazy(() => import("./Progress").then((module) => ({ default
 const WeekChart = lazy(() => import("./WeekChart"));
 import { SwipeToDelete } from "./Swipe";
 import { Field, FormError, ModalShell, NumberField } from "./ui";
+import { FastingCard, RecipeForm, TargetCalculator } from "./Nutrition";
 import { CardioCard, CardioForm, HabitsCard, HabitsManager, SleepCard, SleepForm, StepsCard, cardioLabel } from "./Health";
 import { BarcodeScanner, lookupBarcode } from "./Barcode";
 import { fromKg, setPrefs, toKg, usePrefs } from "./prefs";
 import type { ThemePref, Unit } from "./prefs";
-import type { BackupStatus, Cardio, DashboardData, DayLog, FoodSource, HabitStatus, Food, Meal, Serving, Targets, Workout } from "./types";
+import type { BackupStatus, Cardio, DashboardData, DayLog, EnergyEstimate, Fast, FoodSource, HabitStatus, Profile, Food, Meal, Serving, Targets, Workout } from "./types";
 
 type Page = "dashboard" | "foods" | "workouts" | "progress" | "settings";
-type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | null;
+type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | "recipe" | null;
 type WorkoutBody = { name: string; date: string; sets: { exercise_name: string; set_number: number; reps: number; weight_kg: number }[] };
 
 const BACKUP_REMIND_DAYS = 7;
@@ -134,6 +137,8 @@ export default function App() {
   const [habits, setHabits] = useState<HabitStatus[]>([]);
   const [cardio, setCardio] = useState<Cardio[]>([]);
   const [editingCardio, setEditingCardio] = useState<Cardio | null>(null);
+  const [fasting, setFasting] = useState<{ active: Fast | null; recent: Fast[] }>({ active: null, recent: [] });
+  const [targetContext, setTargetContext] = useState<{ profile: Profile | null; weightKg: number | null; energy: EnergyEstimate | null }>({ profile: null, weightKg: null, energy: null });
   const [editingMeal, setEditingMeal] = useState<Meal | null>(null);
   const [undoMessage, setUndoMessage] = useState("");
   const [scanOnOpen, setScanOnOpen] = useState(false);
@@ -151,7 +156,8 @@ export default function App() {
       api.backupStatus(),
       api.day(selectedDate),
     ]);
-    const [nextHabits, nextCardio] = await Promise.all([api.habits(selectedDate), api.cardio()]);
+    const [nextHabits, nextCardio, nextFasting] = await Promise.all([api.habits(selectedDate), api.cardio(), api.fasting()]);
+    setFasting(nextFasting);
     setDayLog(nextDay);
     setHabits(nextHabits);
     setCardio(nextCardio);
@@ -230,6 +236,17 @@ export default function App() {
     setEditingWorkout(edit);
     setWorkoutTemplate(template);
     openModal("workout");
+  }
+
+  async function openTargets() {
+    const [profile, weights, energy] = await Promise.all([api.profile(), api.weights(), api.energyEstimate(localDate())]);
+    setTargetContext({ profile, weightKg: weights.length ? weights[weights.length - 1].weight_kg : null, energy });
+    openModal("targets");
+  }
+
+  function openRecipeEditor(food: Food | null = null) {
+    setEditingFood(food);
+    openModal("recipe");
   }
 
   function openCardioEditor(session: Cardio | null = null) {
@@ -328,12 +345,17 @@ export default function App() {
                 onManageHabits={() => openModal("habits")}
                 onAddHabit={(name) => void runAction(() => api.addHabit(name), undefined, { keepOpen: true })}
                 onEditCardio={(session) => openCardioEditor(session)}
+                fasting={fasting}
+                onStartFast={(goal, start) => void runAction(() => api.startFast(goal, start), "Fast started.")}
+                onEndFast={() => void runAction(() => api.endFast(), "Fast ended.")}
+                onAdjustFast={(change) => void runAction(() => api.adjustFast(change))}
+                onCopyPrevious={() => void runAction(() => api.copyMeals(addDays(selectedDate, -1), selectedDate), `Copied meals from ${dayName(addDays(selectedDate, -1)).replace(/^(Yesterday|Today)$/, (word) => word.toLowerCase())}.`, { undoable: true })}
                 onAddWater={(ml) => void api.addWater(selectedDate, ml).then((water_ml) => setDayLog((current) => ({ ...current, water_ml }))).catch(() => setError("Couldn't save water."))}
                 onSaveNote={(note) => api.setNote(selectedDate, note).catch(() => setError("Couldn't save your note."))}
                 onLogMeal={() => openModal("meal")}
                 onLogWorkout={() => openWorkoutEditor()}
                 onEditWorkout={(workout) => openWorkoutEditor({ edit: workout })}
-                onSetTargets={() => openModal("targets")}
+                onSetTargets={() => void openTargets()}
                 onNavigate={setPage}
                 onEditMeal={openMealEditor}
                 onDeleteMeal={(meal) => runAction(() => api.deleteMeal(meal.id), `${meal.food_name} removed.`, { undoable: true })}
@@ -343,7 +365,8 @@ export default function App() {
                 foods={foods}
                 onAdd={() => openFoodEditor()}
                 onScan={() => openFoodEditor(null, { scan: true })}
-                onEdit={openFoodEditor}
+                onEdit={(food) => (food.recipe ? openRecipeEditor(food) : openFoodEditor(food))}
+                onRecipe={() => openRecipeEditor()}
                 onDelete={(food) => void runAction(() => api.deleteFood(food.id), `"${food.name}" deleted.`, { undoable: true })}
               />
             ) : page === "workouts" ? (
@@ -363,7 +386,7 @@ export default function App() {
             ) : (
               <SettingsPage
                 targets={dashboard?.targets ?? EMPTY_TARGETS}
-                onEditTargets={() => openModal("targets")}
+                onEditTargets={() => void openTargets()}
                 backup={backup}
                 onBackup={() => void runBackup()}
                 onImport={(backup) => runAction(() => api.importData(backup), "Backup restored.")}
@@ -480,9 +503,25 @@ export default function App() {
           />
         </ModalShell>
       )}
+      {modal === "recipe" && (
+        <ModalShell title={editingFood ? "Edit recipe" : "New recipe"} eyebrow="FOOD LIBRARY" onClose={closeModal}>
+          <RecipeForm
+            key={editingFood?.id ?? "new"}
+            foods={foods}
+            initial={editingFood}
+            busy={busy}
+            error={error}
+            onSubmit={(body) => runAction(() => api.saveRecipe(body, editingFood?.id), editingFood ? "Recipe updated." : `${body.name} added to your library.`)}
+          />
+        </ModalShell>
+      )}
       {modal === "targets" && (
         <ModalShell title="Set your targets" eyebrow="YOUR SETTINGS" onClose={closeModal}>
           <TargetsForm
+            context={targetContext}
+            onSaveProfile={async (profile) => {
+              try { await api.saveProfile(profile); return true; } catch (cause) { setError(cause instanceof Error ? cause.message : "Couldn't save your details."); return false; }
+            }}
             targets={dashboard?.targets ?? EMPTY_TARGETS}
             busy={busy}
             error={error}
@@ -539,6 +578,11 @@ function DashboardPage({
   onManageHabits,
   onAddHabit,
   onEditCardio,
+  fasting,
+  onStartFast,
+  onEndFast,
+  onAdjustFast,
+  onCopyPrevious,
   onAddWater,
   onSaveNote,
   onLogMeal,
@@ -565,6 +609,11 @@ function DashboardPage({
   onManageHabits: () => void;
   onAddHabit: (name: string) => void;
   onEditCardio: (session: Cardio) => void;
+  fasting: { active: Fast | null; recent: Fast[] };
+  onStartFast: (goalH: number, start?: number) => void;
+  onEndFast: () => void;
+  onAdjustFast: (change: { start?: number; goal_h?: number }) => void;
+  onCopyPrevious: () => void;
   onAddWater: (ml: number) => void;
   onSaveNote: (note: string) => Promise<unknown>;
   onLogMeal: () => void;
@@ -669,6 +718,14 @@ function DashboardPage({
             );
           })}
         </div>
+        {totals.extras_known && (
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 rounded-2xl bg-night/70 px-4 py-2.5 text-[11px] text-muted">
+            <span>Sugar <b className="font-semibold text-white">{formatNumber(totals.sugar_g)} g</b></span>
+            <span>Sat. fat <b className="font-semibold text-white">{formatNumber(totals.sat_fat_g)} g</b></span>
+            <span>Sodium <b className="font-semibold text-white">{formatNumber(Math.round(totals.sodium_mg))} mg</b></span>
+            <span className="w-full text-[10px]">From foods that list these values.</span>
+          </div>
+        )}
         <p className="mt-4 flex items-start gap-2 text-[10px] leading-4 text-muted"><ShieldCheck size={13} className="mt-0.5 shrink-0 text-mint" /> Nutrition totals are calculated from the values you entered in your food library. They are not independently verified.</p>
       </section>
 
@@ -677,7 +734,8 @@ function DashboardPage({
         <StepsCard key={date} steps={dayLog.steps} target={data.targets.steps} onSave={onSaveSteps} onSetTarget={onSetTargets} />
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <FastingCard key={fasting.active?.id ?? "idle"} active={fasting.active} recent={fasting.recent} onStart={onStartFast} onEnd={onEndFast} onAdjust={onAdjustFast} />
         <HabitsCard habits={habits} onToggle={onToggleHabit} onManage={onManageHabits} onAdd={onAddHabit} />
       </div>
 
@@ -732,7 +790,10 @@ function DashboardPage({
       <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="mb-4 flex items-center justify-between">
           <div><h3 className="font-semibold">{isToday ? "Today's" : `${day}'s`} food</h3><p className="mt-1 text-xs text-muted">Tap an entry to change its portion</p></div>
-          <button onClick={onLogMeal} className="button-secondary !min-h-9 !px-3"><Plus size={14} /> Add meal</button>
+          <div className="flex shrink-0 gap-1.5">
+            <button onClick={onCopyPrevious} className="button-secondary !min-h-9 !px-2.5" title="Copy the previous day's meals"><Copy size={14} /> {isToday ? "Yesterday" : "Day before"}</button>
+            <button onClick={onLogMeal} className="button-secondary !min-h-9 !px-3"><Plus size={14} /> Add</button>
+          </div>
         </div>
         {meals.length === 0 ? (
           <EmptyState
@@ -876,12 +937,12 @@ function BackupBanner({ backup, onBackup, onOpenSettings }: { backup: BackupStat
   );
 }
 
-function FoodLibrary({ foods, onAdd, onScan, onEdit, onDelete }: { foods: Food[]; onAdd: () => void; onScan: () => void; onEdit: (food: Food) => void; onDelete: (food: Food) => void }) {
+function FoodLibrary({ foods, onAdd, onScan, onRecipe, onEdit, onDelete }: { foods: Food[]; onAdd: () => void; onScan: () => void; onRecipe: () => void; onEdit: (food: Food) => void; onDelete: (food: Food) => void }) {
   const [search, setSearch] = useState("");
   const visibleFoods = useMemo(() => foods.filter((food) => `${food.name} ${food.brand ?? ""}`.toLowerCase().includes(search.toLowerCase())), [foods, search]);
   return (
     <div className="mx-auto max-w-[1050px]">
-      <PageIntro eyebrow="YOUR FOODS" title="Food library" detail="Your foods with nutrition per 100 g. Scan a packet's barcode or enter values from the label." action={<div className="flex shrink-0 gap-2"><button onClick={onScan} className="button-secondary !px-3"><ScanBarcode size={16} /> Scan</button><button onClick={onAdd} className="button-primary !px-3"><Plus size={16} /> Add</button></div>} />
+      <PageIntro eyebrow="YOUR FOODS" title="Food library" detail="Your foods with nutrition per 100 g. Scan a packet's barcode or enter values from the label." action={<div className="flex shrink-0 gap-1.5"><button onClick={onScan} className="button-secondary !px-2.5" aria-label="Scan barcode"><ScanBarcode size={16} /></button><button onClick={onRecipe} className="button-secondary !px-2.5"><ChefHat size={16} /> Recipe</button><button onClick={onAdd} className="button-primary !px-2.5"><Plus size={16} /> Add</button></div>} />
       <div className="mb-5 flex items-center gap-3 rounded-2xl border border-line bg-panel px-4">
         <Search size={16} className="shrink-0 text-muted" />
         <input value={search} onChange={(event) => setSearch(event.target.value)} className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted" placeholder="Search foods or brands" />
@@ -913,7 +974,7 @@ function FoodLibrary({ foods, onAdd, onScan, onEdit, onDelete }: { foods: Food[]
                   <span><b className="font-medium text-white">{formatNumber(food.fiber_g_per_100g)}g</b> fiber</span>
                 </div>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>{food.source === "open-food-facts" ? "From Open Food Facts · check against the label" : "Manually entered · not independently verified"}</span></div>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>{food.source === "open-food-facts" ? "From Open Food Facts · check against the label" : food.source === "recipe" ? "Recipe · from your ingredients" : "Manually entered · not independently verified"}</span></div>
               {food.notes && <p className="mt-2 text-[10px] leading-4 text-muted">{food.notes}</p>}
             </article>
             </SwipeToDelete>
@@ -938,6 +999,9 @@ function FoodForm({ initialFood, existingFoods, autoScan, busy, error, onSubmit 
     fat_g_per_100g: initialFood ? String(initialFood.fat_g_per_100g) : "",
     fiber_g_per_100g: initialFood ? String(initialFood.fiber_g_per_100g) : "",
     notes: initialFood?.notes ?? "",
+    sugar_g_per_100g: initialFood?.sugar_g_per_100g != null ? String(initialFood.sugar_g_per_100g) : "",
+    sat_fat_g_per_100g: initialFood?.sat_fat_g_per_100g != null ? String(initialFood.sat_fat_g_per_100g) : "",
+    sodium_mg_per_100g: initialFood?.sodium_mg_per_100g != null ? String(initialFood.sodium_mg_per_100g) : "",
   });
   const [servings, setServings] = useState((initialFood?.servings ?? []).map((serving) => ({ label: serving.label, grams: String(serving.grams) })));
   // Barcode scanning (new foods only)
@@ -973,6 +1037,9 @@ function FoodForm({ initialFood, existingFoods, autoScan, busy, error, onSubmit 
         carbohydrates_g_per_100g: text(found.carbs),
         fat_g_per_100g: text(found.fat),
         fiber_g_per_100g: text(found.fiber),
+        sugar_g_per_100g: text(found.sugar),
+        sat_fat_g_per_100g: text(found.satFat),
+        sodium_mg_per_100g: text(found.sodiumMg),
         notes: `Barcode ${barcode} · from Open Food Facts`,
       }));
       if (found.serving) setServings([{ label: found.serving.label, grams: String(found.serving.grams) }]);
@@ -1010,6 +1077,9 @@ function FoodForm({ initialFood, existingFoods, autoScan, busy, error, onSubmit 
       fat_g_per_100g: Number(form.fat_g_per_100g),
       fiber_g_per_100g: Number(form.fiber_g_per_100g),
       notes: form.notes.trim() || null,
+      sugar_g_per_100g: form.sugar_g_per_100g.trim() ? Number(form.sugar_g_per_100g) : null,
+      sat_fat_g_per_100g: form.sat_fat_g_per_100g.trim() ? Number(form.sat_fat_g_per_100g) : null,
+      sodium_mg_per_100g: form.sodium_mg_per_100g.trim() ? Number(form.sodium_mg_per_100g) : null,
       servings: filledServings.map((serving) => ({ label: serving.label.trim(), grams: Number(serving.grams) })),
       ...(initialFood ? {} : { source }),
     });
@@ -1047,6 +1117,12 @@ function FoodForm({ initialFood, existingFoods, autoScan, busy, error, onSubmit 
           <NumberField label="Carbohydrates · g" value={form.carbohydrates_g_per_100g} onChange={(v) => set("carbohydrates_g_per_100g", v)} required />
           <NumberField label="Fat · g" value={form.fat_g_per_100g} onChange={(v) => set("fat_g_per_100g", v)} required />
           <NumberField label="Fiber · g" value={form.fiber_g_per_100g} onChange={(v) => set("fiber_g_per_100g", v)} required />
+        </div>
+        <p className="mb-2 mt-4 text-xs font-medium text-zinc-300">Optional, per 100 g</p>
+        <div className="grid grid-cols-3 gap-3">
+          <NumberField label="Sugar · g" value={form.sugar_g_per_100g} onChange={(v) => set("sugar_g_per_100g", v)} />
+          <NumberField label="Sat. fat · g" value={form.sat_fat_g_per_100g} onChange={(v) => set("sat_fat_g_per_100g", v)} />
+          <NumberField label="Sodium · mg" value={form.sodium_mg_per_100g} onChange={(v) => set("sodium_mg_per_100g", v)} />
         </div>
       </div>
       <div>
@@ -1376,7 +1452,7 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
   );
 }
 
-function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; busy: boolean; error: string; onSubmit: (body: Targets) => void }) {
+function TargetsForm({ context, onSaveProfile, targets, busy, error, onSubmit }: { context: { profile: Profile | null; weightKg: number | null; energy: EnergyEstimate | null }; onSaveProfile: (profile: Profile) => Promise<boolean>; targets: Targets; busy: boolean; error: string; onSubmit: (body: Targets) => void }) {
   const [form, setForm] = useState({
     calories: targets.calories == null ? "" : String(targets.calories),
     protein_g: targets.protein_g == null ? "" : String(targets.protein_g),
@@ -1407,8 +1483,17 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
   }
   const update = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
   return (
+    <div className="space-y-4">
+    {/* Outside the targets <form>: the calculator has a form of its own. */}
+    <TargetCalculator
+      profile={context.profile}
+      latestWeightKg={context.weightKg}
+      energy={context.energy}
+      onSaveProfile={onSaveProfile}
+      onApply={(values) => setForm((current) => ({ ...current, ...Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value == null ? "" : String(value)])) }))}
+    />
     <form onSubmit={submit} className="space-y-4">
-      <p className="rounded-xl border border-line bg-night p-3 text-[11px] leading-5 text-muted">Targets are optional and personal. Leave any field blank if you don't use that target.</p>
+      <p className="rounded-xl border border-line bg-night p-3 text-[11px] leading-5 text-muted">Targets are optional and personal. Leave any field blank if you don't use that target. Review, then tap Save targets.</p>
       <div className="grid grid-cols-2 gap-3">
         <NumberField label="Calories · kcal" value={form.calories} onChange={(v) => update("calories", v)} />
         <NumberField label="Protein · g" value={form.protein_g} onChange={(v) => update("protein_g", v)} />
@@ -1422,6 +1507,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
       {(validation || error) && <FormError message={validation || error} />}
       <button disabled={busy} className="button-primary w-full disabled:opacity-60">{busy ? "Saving…" : "Save targets"}</button>
     </form>
+    </div>
   );
 }
 
