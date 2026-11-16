@@ -411,7 +411,7 @@ export default function App() {
                 <Dumbbell size={16} />
               </button>
               <button onClick={() => openModal("meal")} className="button-primary !min-h-10 !px-3 sm:!px-4">
-                <Plus size={16} /><span className="hidden sm:inline">Log food</span><span className="sm:hidden">Food</span>
+                <Utensils size={16} /><span className="hidden sm:inline">Log meal</span><span className="sm:hidden">Log</span>
               </button>
             </div>
           </div>
@@ -1099,7 +1099,7 @@ function FoodLibrary({ foods, onAdd, onScan, onRecipe, onEdit, onDelete }: { foo
   const visibleFoods = useMemo(() => foods.filter((food) => `${food.name} ${food.brand ?? ""}`.toLowerCase().includes(search.toLowerCase())), [foods, search]);
   return (
     <div className="mx-auto max-w-[1050px]">
-      <PageIntro eyebrow="YOUR FOODS" title="Food library" detail="Your foods with nutrition per 100 g. Scan a packet's barcode or enter values from the label." action={<div className="flex shrink-0 gap-1.5"><button onClick={onScan} className="button-secondary !px-2.5" aria-label="Scan barcode"><ScanBarcode size={16} /></button><button onClick={onRecipe} className="button-secondary !px-2.5"><ChefHat size={16} /> Recipe</button><button onClick={onAdd} className="button-primary !px-2.5"><Plus size={16} /> Add</button></div>} />
+      <PageIntro eyebrow="YOUR FOODS" title="Food library" detail="Your foods with nutrition per 100 g. Scan a packet's barcode or enter values from the label." action={<div className="flex shrink-0 gap-1.5"><button onClick={onScan} className="button-secondary !px-2.5" aria-label="Scan barcode"><ScanBarcode size={16} /></button><button onClick={onRecipe} className="button-secondary !px-2.5"><ChefHat size={16} /> Recipe</button><button onClick={onAdd} className="button-primary !px-2.5"><Plus size={16} /> New food</button></div>} />
       <div className="mb-5 flex items-center gap-3 rounded-2xl border border-line bg-panel px-4">
         <Search size={16} className="shrink-0 text-muted" />
         <input value={search} onChange={(event) => setSearch(event.target.value)} className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted" placeholder="Search foods or brands" />
@@ -1894,7 +1894,7 @@ function SettingToggle<T extends string>({ label, value, options, onChange }: { 
 function PageIntro({ eyebrow, title, detail, action }: { eyebrow: string; title: string; detail: string; action?: ReactNode }) {
   return (
     // On phones the header already shows the page title, so only the short description and action remain.
-    <div className="mb-4 flex items-center justify-between gap-3 sm:mb-7 sm:flex-wrap sm:items-end sm:gap-4">
+    <div className="mb-4 flex flex-col gap-3 sm:mb-7 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between sm:gap-4">
       <div className="min-w-0"><p className="mb-2 hidden text-[10px] font-bold tracking-[.2em] text-lime sm:block">{eyebrow}</p><h2 className="hidden text-2xl font-semibold tracking-tight sm:block sm:text-3xl">{title}</h2><p className="max-w-xl text-xs leading-5 text-muted sm:mt-2 sm:text-sm sm:leading-6">{detail}</p></div>
       {action}
     </div>

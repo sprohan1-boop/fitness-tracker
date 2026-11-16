@@ -25,6 +25,20 @@ registerSW({
 
 applyTheme(); // before first paint, so there is no flash of the wrong theme
 
+// The part of the screen actually visible: on iPhone the keyboard shrinks it and may shift
+// the page up. Pop-ups size themselves to it so their text boxes stay above the keyboard.
+const viewport = window.visualViewport;
+if (viewport) {
+  const syncViewport = () => {
+    const root = document.documentElement.style;
+    root.setProperty("--vv-height", `${viewport.height}px`);
+    root.setProperty("--vv-top", `${viewport.offsetTop}px`);
+  };
+  syncViewport();
+  viewport.addEventListener("resize", syncViewport);
+  viewport.addEventListener("scroll", syncViewport);
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

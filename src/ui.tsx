@@ -7,8 +7,9 @@ import { formatNumber, normalizeServing } from "./utils";
 
 export function ModalShell({ title, eyebrow, onClose, children }: { title: string; eyebrow: string; onClose: () => void; children: ReactNode }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="relative max-h-[calc(100dvh_-_env(safe-area-inset-top)_-_12px)] w-full overflow-y-auto overflow-x-hidden overscroll-contain rounded-t-3xl border border-line bg-panel p-5 pb-[max(env(safe-area-inset-bottom),20px)] shadow-2xl sm:max-h-[94dvh] sm:max-w-[540px] sm:rounded-3xl sm:p-6">
+    // Sized to the visible area (see main.tsx), so the sheet sits just above the iPhone keyboard.
+    <div className="fixed inset-x-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-5" style={{ top: "var(--vv-top, 0px)", height: "var(--vv-height, 100dvh)" }} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="relative max-h-[calc(var(--vv-height,100dvh)_-_env(safe-area-inset-top)_-_12px)] w-full overflow-y-auto overflow-x-hidden overscroll-contain rounded-t-3xl border border-line bg-panel p-5 pb-[max(env(safe-area-inset-bottom),20px)] shadow-2xl sm:max-h-[94dvh] sm:max-w-[540px] sm:rounded-3xl sm:p-6">
         <div className="mb-5 flex items-start justify-between">
           <div><p className="text-[9px] font-bold tracking-[.2em] text-lime">{eyebrow}</p><h2 className="mt-1.5 text-xl font-semibold">{title}</h2></div>
           <button onClick={onClose} className="rounded-xl border border-line p-2 text-muted transition hover:bg-panel-raised hover:text-white" aria-label="Close"><X size={16} /></button>
