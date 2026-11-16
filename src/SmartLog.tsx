@@ -76,7 +76,7 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
   }
   function pick(index: number, choice: Choice) {
     const line = lines[index];
-    const amount = gramsFor(choice, line.qty, line.unit);
+    const amount = gramsFor(choice, line.qty, line.unit, parseItem(line.text).counted);
     const withBone = parseItem(line.text).withBone && choice.kind !== "ai";
     const grams = amount.grams === null ? null : withBone ? Math.round(amount.grams * 0.7) : amount.grams;
     update(index, { choice, grams: grams === null ? "" : String(grams), estimatedAmount: amount.estimated || withBone, partial: null, note: withBone ? "Weight includes bone: counted 70% as meat." : "" });
@@ -183,10 +183,10 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
             </>
           ) : (
             <>
-              <p className="mt-1 text-xs text-amber-300">{line.partial ? `No exact match: nothing found with "${line.partial}".` : "Not found in your foods or the database."}</p>
+              <p className="mt-1 text-xs text-amber-300">{line.partial ? `No exact match for “${line.partial}” in your foods or the database.` : "Not found in your foods or the database."}</p>
               {line.alternatives.length > 0 && (
                 <div className="mt-2 space-y-1">
-                  <p className="text-[10px] text-muted">Near matches{line.partial ? ` (without "${line.partial}")` : ""}:</p>
+                  <p className="text-[10px] text-muted">Closest foods (pick one only if it's close enough):</p>
                   {line.alternatives.slice(0, 3).map((alternative) => (
                     <button key={choiceName(alternative)} type="button" onClick={() => pick(index, alternative)} className="block w-full rounded-lg border border-line/70 px-2.5 py-2 text-left text-[12px] leading-4">
                       {choiceName(alternative)} <span className={`text-[10px] ${sourceLabel(alternative).tone}`}>· {sourceLabel(alternative).text}</span>

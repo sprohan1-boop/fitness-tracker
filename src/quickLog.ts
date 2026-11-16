@@ -1,6 +1,6 @@
 // Free, on-device "quick log": turns "2 roti, 1 bowl dal and chai" into food + amount lines,
 // matched against your library first and then the built-in USDA database. No AI, works offline.
-import { libraryWords, searchFoodDb } from "./foodDb";
+import { DESCRIBING, isWholePortion, libraryTerms, rankFoodDb, ROUGH, tokens } from "./foodDb";
 import type { DbFood } from "./foodDb";
 import type { Food, Serving } from "./types";
 import { normalizeServing } from "./utils";
@@ -20,7 +20,7 @@ export type QuickLine = {
   grams: string; // editable amount in grams, "" when unknown
   estimatedAmount: boolean; // amount guessed from a household measure
   note: string; // e.g. "Weight includes bone: counted 70% as meat."
-  partial: string | null; // the dish words a near-match leaves out ("curry"); such lines start unmatched
+  partial: string | null; // the words of the food a near-match leaves out ("curry"); such lines start unmatched
 };
 
 const NUMBER_WORDS: Record<string, number> = {
@@ -45,7 +45,8 @@ const HOUSEHOLD_GRAMS: Record<string, number> = { bowl: 150, cup: 240, glass: 25
 
 // Which words in a portion label count as that unit.
 const UNIT_MATCH: Record<string, RegExp> = {
-  cup: /\bcup/, bowl: /\bbowl/, // a katori is smaller than USDA's cup, so bowls fall back to ~150 g glass: /\b(glass|cup|fl oz)/, piece: /\b(piece|pc|unit|item|each|whole)\b/, slice: /\bslice/,
+  // A katori is smaller than USDA's cup, so bowls fall back to ~150 g unless the food has a bowl portion.
+  cup: /\bcup/, bowl: /\bbowl/, glass:/\b(glass|cup|fl oz)/, piece: /\b(piece|pc|unit|item|each|whole)\b/, slice: /\bslice/,
   tbsp: /\b(tbsp|tablespoon)/, tsp: /\b(tsp|teaspoon)/, small: /\bsmall/, medium: /\bmedium/, large: /\b(large|big)/, serving: /\bserving/,
   scoop: /\bscoop/, plate: /\bplate/, handful: /\bhandful/,
 };
@@ -66,7 +67,7 @@ function parseNumber(token: string): number | null {
 }
 
 /** "2 roti", "1/2 cup rice", "200g chicken", "half a banana", "roti x2" -> quantity, unit, food words. */
-export function parseItem(text: string): { qty: number; unit: string | null; foodText: string; withBone: boolean } {
+export function parseItem(text: string): { qty: number; unit: string | null; foodText: string; withBone: boolean; counted: boolean } {
   let rest = text.toLowerCase().replace(/(\d)(g|gm|gms|kg|ml|l)\b/g, "$1 $2").replace(/\s+/g, " ").trim();
   let qty: number | null = null;
   let unit: string | null = null;
@@ -83,7 +84,7 @@ export function parseItem(text: string): { qty: number; unit: string | null; foo
     unit = UNITS[weight[2]];
     rest = `${rest.slice(0, weight.index)} ${rest.slice((weight.index ?? 0) + weight[0].length)}`.replace(/\s+/g, " ").trim();
     while (rest.startsWith("of ")) rest = rest.slice(3);
-    return { qty, unit, foodText: rest, withBone };
+    return { qty, unit, foodText: rest, withBone, counted: true };
   }
 
   // Trailing "x2" / "*2" / "2x"
@@ -106,7 +107,13 @@ export function parseItem(text: string): { qty: number; unit: string | null; foo
     unit = UNITS[tokens.shift() as string];
     if (tokens[0] === "of") tokens.shift();
   }
-  return { qty: qty ?? 1, unit, foodText: tokens.join(" ").trim(), withBone };
+  // A unit at the end: "cheese slice", "rice bowl", "chicken piece".
+  const lastWord = tokens[tokens.length - 1];
+  if (!unit && tokens.length > 1 && UNITS[lastWord] && !["small", "medium", "large", "big"].includes(lastWord)) {
+    unit = UNITS[lastWord];
+    tokens.pop();
+  }
+  return { qty: qty ?? 1, unit, foodText: tokens.join(" ").trim(), withBone, counted: qty !== null };
 }
 
 function nameOf(choice: Choice): string {
@@ -117,8 +124,26 @@ function servingsOf(choice: Choice): Serving[] {
   return raw.map(normalizeServing);
 }
 
-/** Grams for a quantity + unit of a chosen food. */
-export function gramsFor(choice: Choice, qty: number, unit: string | null): { grams: number | null; estimated: boolean } {
+/**
+ * With no number or unit ("almonds", "sugar", "cabbage"): the first portion that's a real serving,
+ * 15-400 kcal, at most 400 g and not a whole head or bunch (not 1 almond, a cup of sugar or a whole
+ * cabbage); for near-zero-calorie drinks, their first portion of 50 g or more; else none, and the
+ * caller uses a weight guess.
+ */
+function usualServing(choice: Choice, servings: Serving[]): Serving | undefined {
+  const kcal = (serving: Serving) => nutritionFor(choice, serving.grams).kcal;
+  // "1 oz" of meat or juice isn't a serving (an ounce of nuts is).
+  const ounce = (serving: Serving) => /^[\d./\s]*(oz|fl oz|ounce)\b/i.test(serving.label) && kcal(serving) < 100;
+  const sensible = servings.filter((serving) => kcal(serving) <= 400 && serving.grams <= 400 && !isWholePortion(serving.label) && !ounce(serving));
+  // Near-zero-calorie foods (black coffee, tea, water) never reach 15 kcal: their first proper-sized portion.
+  return sensible.find((serving) => kcal(serving) >= 15) ?? sensible.find((serving) => serving.grams >= 50);
+}
+
+/**
+ * Grams for a quantity + unit of a chosen food. `counted`: a number was typed ("2 carrots"); with
+ * no number and no unit ("grapes", "almonds") a real serving is used, not one grape or one almond.
+ */
+export function gramsFor(choice: Choice, qty: number, unit: string | null, counted = true): { grams: number | null; estimated: boolean } {
   if (choice.kind === "ai") return { grams: choice.grams, estimated: false };
   if (unit === "g" || unit === "ml") return { grams: qty, estimated: false };
   if (unit === "kg" || unit === "l") return { grams: qty * 1000, estimated: false };
@@ -128,84 +153,137 @@ export function gramsFor(choice: Choice, qty: number, unit: string | null): { gr
     if (portion) return { grams: Math.round(qty * portion.grams), estimated: false };
   }
   if (unit && HOUSEHOLD_GRAMS[unit]) return { grams: Math.round(qty * HOUSEHOLD_GRAMS[unit]), estimated: true };
-  if (servings[0]) return { grams: Math.round(qty * servings[0].grams), estimated: unit !== null };
+  const bare = !counted && !unit;
+  const serving = bare ? usualServing(choice, servings) : servings[0];
+  if (serving) return { grams: Math.round(qty * serving.grams), estimated: unit !== null };
+  // No usable portion: 100 g, or less for dense foods (about 200 kcal), marked as a guess.
+  if (bare) {
+    const per100 = nutritionFor(choice, 100).kcal;
+    return { grams: per100 > 200 ? Math.round((200 / per100) * 100) : 100, estimated: true };
+  }
   return { grams: Math.round(qty * 100), estimated: true };
 }
 
-/** Your own foods containing every word (as typed, or via a synonym: "chai" finds "Milk Tea"), shortest first. */
-function matchLibrary(foods: Food[], foodText: string): Food[] {
-  const { plain, mapped } = libraryWords(foodText);
+/** Your own foods with every word as a whole word (as typed, or translated: "chai" finds "Tea"), single foods first. */
+function matchLibrary(foods: Food[], phrase: string): Food[] {
+  const { plain, mapped } = libraryTerms(phrase);
   if (!plain.length) return [];
   return foods
     .filter((food) => {
-      const name = `${food.name} ${food.brand ?? ""}`.toLowerCase();
-      return plain.every((word) => name.includes(word)) || mapped.every((word) => name.includes(word));
+      const words = new Set(tokens(`${food.name} ${food.brand ?? ""}`));
+      return plain.every((word) => words.has(word)) || mapped.every((word) => words.has(word));
     })
     // Single foods before recipes that merely contain the word ("biscuit" vs "Tea and 2 biscuits").
     .sort((a, b) => Number(a.source === "recipe") - Number(b.source === "recipe") || a.name.length - b.name.length);
 }
 
-// Words that describe how, not what ("chai with less sugar" is about chai).
-const FILLER = new Set(["with", "without", "less", "no", "extra", "some", "little", "bit", "of", "the", "my", "homemade", "home", "made", "fresh", "hot", "cold", "plain"]);
-const mainWords = (text: string) => text.split(/\s+/).filter((word) => word && !FILLER.has(word)).join(" ");
+// Words that carry no food meaning.
+const FILLER = new Set(["some", "little", "bit", "of", "the", "my", "a", "an", "and", "in", "on", "for", "homemade", "home", "made", "fresh", "hot", "plain", "warm", "freshly", "style", "type"]);
+// After these words come add-ons ("chai with sugar", "dosa with chutney", "coffee without sugar"): useful,
+// but not what the food is, so a match may leave them out (and says so).
+const EXTRAS_AFTER = new Set(["with", "without", "less", "no", "extra"]);
+// Describing words ("black", "boiled": see DESCRIBING in foodDb.ts) may also be left out (and the line says so).
 
-// Words that name the dish: a match that leaves one out is a different food ("chicken" isn't "chicken curry").
-const DISH_WORDS = new Set([
-  "curry", "masala", "biryani", "biriyani", "pulao", "pulav", "korma", "tikka", "makhani", "gravy", "sabzi", "sabji", "subzi", "kofta",
-  "paratha", "parantha", "dosa", "idli", "sambar", "rasam", "kheer", "halwa", "pakora", "pakoda", "samosa", "chaat", "fry", "fried",
-  "butter", "tandoori", "kebab", "kabab", "keema", "soup", "salad", "sandwich", "pizza", "burger", "pasta", "noodles", "roll", "wrap",
-  "cake", "shake", "smoothie", "juice", "lassi", "raita", "manchurian", "chilli", "chili", "bhaji", "bhurji", "upma", "poha", "khichdi",
-  "dal", "daal", "chole", "rajma", "paneer", "kadhi", "pav", "vada", "uttapam", "momos", "omelette", "omelet", "fritter", "stew",
-]);
-
-/** "chai with less sugar" -> tries the whole phrase, then "chai with less", "chai with", "chai". */
-function shorterPhrases(foodText: string): string[] {
-  const parts = foodText.split(/\s+/).filter(Boolean);
-  return parts.map((_, i) => parts.slice(0, parts.length - i).join(" ")).filter((phrase) => phrase.length > 1);
+/** Splits food words into the ones a match must cover and the ones it may leave out. */
+export function classify(foodText: string): { required: string[]; optional: string[] } {
+  const required: string[] = [];
+  const optional: string[] = [];
+  let extras = false;
+  for (const word of foodText.toLowerCase().split(/[^a-z0-9%]+/).filter(Boolean)) {
+    if (EXTRAS_AFTER.has(word)) { extras = true; continue; }
+    if (FILLER.has(word)) continue;
+    (extras || DESCRIBING.has(word) ? optional : required).push(word);
+  }
+  // A food named only by describing words ("raw", "black"): they're all it has.
+  if (!required.length) return { required: optional, optional: [] };
+  return { required, optional };
 }
 
-/** Parses free text into lines with a best match, alternatives and grams. */
+/** Shorter runs of words, longest first and earlier words first: "chicken tikka masala" -> "chicken tikka", "tikka masala", "chicken", … */
+function subPhrases(words: string[]): string[][] {
+  const runs: string[][] = [];
+  for (let size = words.length - 1; size >= 1; size -= 1) for (let from = 0; from + size <= words.length; from += 1) runs.push(words.slice(from, from + size));
+  return runs;
+}
+
+/**
+ * Parses free text into lines with a best match, alternatives and grams.
+ *
+ * The rule that keeps it honest: a food is picked automatically only when its name covers every
+ * word that says what the food is (whole words; plurals and Indian names understood). If only part
+ * of what you typed matches ("chicken" for "chicken curry"), the line stays unmatched and shows
+ * near matches to pick from, or the AI estimates it. Only describing words ("black", "boiled") and
+ * add-ons ("with sugar") may be left out, and the line then says what was left out.
+ */
 export function quickLog(input: string, library: Food[], db: DbFood[] | null): QuickLine[] {
   return splitItems(input).map((text) => {
-    const { qty, unit, foodText, withBone } = parseItem(text);
-    const words = mainWords(foodText) || foodText;
-    const phrases = shorterPhrases(words);
-    const allWords = words.split(/\s+/);
-    // Dish words a shorter phrase would leave out.
-    const missing = (phrase: string) => allWords.slice(phrase.split(/\s+/).length).filter((word) => DISH_WORDS.has(word));
-    // Your own foods are tried on every shorter phrase first, then the database.
-    let own: Choice[] = [];
-    let ownPhrase = "";
-    for (const phrase of phrases) {
-      own = matchLibrary(library, phrase).slice(0, 3).map((food) => ({ kind: "library" as const, food }));
-      if (own.length) { ownPhrase = phrase; break; }
+    const { qty, unit, foodText, withBone, counted } = parseItem(text);
+    const { required, optional } = classify(foodText);
+    // Matches for some words, and whether the best one IS that food (see rankFoodDb).
+    const find = (words: string[]): { choices: Choice[]; exact: boolean; names: boolean } => {
+      const phrase = words.join(" ");
+      const own: Choice[] = matchLibrary(library, phrase).slice(0, 3).map((food) => ({ kind: "library" as const, food }));
+      const ownNames = new Set(own.map((choice) => nameOf(choice).toLowerCase()));
+      const ranked = db ? rankFoodDb(db, phrase, 5) : [];
+      // Some words have only a rough stand-in in the database (chai): offered, never picked.
+      const rough = tokens(phrase).some((word) => ROUGH.has(word));
+      const sorted = [...ranked.filter((item) => item.exact && !rough), ...ranked.filter((item) => !item.exact || rough)];
+      const fromDb: Choice[] = sorted.map((item) => ({ kind: "db" as const, item: item.food }));
+      // Your own foods first (they match on your own words); skip database entries you already have.
+      return {
+        choices: [...own, ...fromDb.filter((choice) => !ownNames.has(nameOf(choice).toLowerCase()))],
+        exact: own.length > 0 || (sorted[0]?.exact === true && !rough),
+        names: own.length > 0 || sorted[0]?.exact === true, // it IS (roughly) that food
+      };
+    };
+
+    // Every word first, then only the required ones: an exact match on either is picked.
+    let alternatives: Choice[] = [];
+    let matched: string[] = [];
+    let exact = false;
+    for (const words of optional.length ? [[...required, ...optional], required] : [required]) {
+      const found = find(words);
+      if (found.exact) { alternatives = found.choices; matched = words; exact = true; break; }
+      if (!alternatives.length && found.choices.length) { alternatives = found.choices; matched = []; }
     }
-    let fromDb: Choice[] = [];
-    let dbPhrase = "";
-    for (const phrase of phrases) {
-      fromDb = db ? searchFoodDb(db, phrase, 5).map((item) => ({ kind: "db" as const, item })) : [];
-      if (fromDb.length) { dbPhrase = phrase; break; }
+    if (!alternatives.length) {
+      // Near matches only: shown to pick from (and given to the AI as reference), never picked automatically.
+      // All runs of the longest size that finds anything, so "masala chai" offers tea, not only masala.
+      const runs = subPhrases(required);
+      for (const size of [...new Set(runs.map((run) => run.length))]) {
+        const all = runs.filter((run) => run.length === size).map((run) => ({ run, ...find(run) })).filter((item) => item.choices.length);
+        if (!all.length) continue;
+        // Runs that name a real food first ("chicken" for "chicken curry"); drop loose hits ("cold" -> "cold pressed oil").
+        const found = all.some((item) => item.names) ? all.filter((item) => item.names) : all;
+        const merged: Choice[] = [];
+        for (let i = 0; i < 5; i += 1) {
+          for (const item of found) {
+            const next = item.choices[i];
+            if (next && !merged.some((choice) => nameOf(choice) === nameOf(next))) merged.push(next);
+          }
+        }
+        alternatives = merged.slice(0, 6);
+        matched = found.length === 1 ? found[0].run : [];
+        break;
+      }
     }
-    // Skip database entries you already have in your library.
-    const ownNames = new Set(own.map((choice) => nameOf(choice).toLowerCase()));
-    const alternatives = [...own, ...fromDb.filter((choice) => !ownNames.has(nameOf(choice).toLowerCase()))];
-    const bestPhrase = own.length ? ownPhrase : dbPhrase;
-    const dropped = alternatives.length ? missing(bestPhrase) : [];
-    // A near-match that drops the dish ("chicken" for "chicken curry") isn't picked automatically.
-    const choice = dropped.length ? null : alternatives[0] ?? null;
-    const amount = choice ? gramsFor(choice, qty, unit) : { grams: null, estimated: false };
+
+    const choice = exact ? alternatives[0] ?? null : null;
+    const left = (words: string[]) => [...new Set(words.filter((word) => !matched.includes(word)))];
+    const amount = choice ? gramsFor(choice, qty, unit, counted) : { grams: null, estimated: false };
     let grams = amount.grams;
-    let note = "";
+    const notes: string[] = [];
+    if (choice && left(optional).length) notes.push(`Matched without “${left(optional).join(" ")}”.`);
     if (grams !== null && withBone && choice?.kind !== "ai") {
       grams = Math.round(grams * 0.7);
-      note = "Weight includes bone: counted 70% as meat.";
+      notes.push("Weight includes bone: counted 70% as meat.");
     }
     return {
       text, qty, unit, choice, alternatives,
       grams: grams === null ? "" : String(grams),
       estimatedAmount: amount.estimated || withBone,
-      note,
-      partial: dropped.length ? [...new Set(dropped)].join(" ") : null,
+      note: notes.join(" "),
+      partial: !exact && alternatives.length ? (left(required).join(" ") || required.join(" ")) : null,
     };
   });
 }

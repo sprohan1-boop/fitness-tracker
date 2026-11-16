@@ -31,8 +31,15 @@ const viewport = window.visualViewport;
 if (viewport) {
   const syncViewport = () => {
     const root = document.documentElement.style;
-    root.setProperty("--vv-height", `${viewport.height}px`);
-    root.setProperty("--vv-top", `${viewport.offsetTop}px`);
+    // Only while the keyboard is up: otherwise iPhone reports a height without the bottom edge,
+    // which would leave a strip under the sheet. Without the variables, pop-ups fill the screen.
+    if (window.innerHeight - viewport.height > 150 || viewport.offsetTop > 0) {
+      root.setProperty("--vv-height", `${viewport.height}px`);
+      root.setProperty("--vv-top", `${viewport.offsetTop}px`);
+    } else {
+      root.removeProperty("--vv-height");
+      root.removeProperty("--vv-top");
+    }
   };
   syncViewport();
   viewport.addEventListener("resize", syncViewport);

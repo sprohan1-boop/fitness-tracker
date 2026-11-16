@@ -1489,7 +1489,7 @@ function useFoodDbSearch(term: string) {
     setState((current) => ({ ...current, status: "loading" }));
     const id = window.setTimeout(() => {
       loadFoodDb()
-        .then((db) => { if (live) setState({ status: "ready", results: searchFoodDb(db, term) }); })
+        .then((db) => { if (live) setState({ status: "ready", results: searchFoodDb(db, term, 8, true) }); })
         .catch(() => { if (live) setState({ status: "error", results: [] }); });
     }, 200);
     return () => { live = false; window.clearTimeout(id); };
