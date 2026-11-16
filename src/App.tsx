@@ -266,7 +266,7 @@ export default function App() {
 
         {/* `relative` keeps absolutely positioned children (sr-only labels, chart tooltips) inside this
             scroll box; otherwise they stretch the document and iOS lets the whole page scroll. */}
-        <main ref={mainRef} className="relative flex-1 overflow-y-auto overscroll-contain px-4 pb-6 pt-4 sm:px-7 sm:pt-8 lg:px-10 lg:pb-10">
+        <main ref={mainRef} className="relative flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-6 pt-4 sm:px-7 sm:pt-8 lg:px-10 lg:pb-10">
             {loading ? (
               <LoadingState />
             ) : page === "dashboard" ? (
@@ -504,7 +504,7 @@ function DashboardPage({
       <DateSwitcher date={date} onChange={onDateChange} />
       <BackupBanner backup={backup} onBackup={onBackup} onOpenSettings={() => onNavigate("settings")} />
 
-      <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
         <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -550,7 +550,7 @@ function DashboardPage({
           <div><h3 className="font-semibold">Nutrition breakdown</h3><p className="mt-1 text-xs text-muted">Logged food compared with your personal targets</p></div>
           <button onClick={onSetTargets} className="text-xs font-medium text-lime hover:text-white">{Object.values(data.targets).every((value) => value === null) ? "Set targets" : "Edit targets"}</button>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {targetMetrics.map(({ key, label, short, color, unit }) => {
             const target = data.targets[key];
             const value = totals[key];
@@ -569,7 +569,7 @@ function DashboardPage({
         <p className="mt-4 flex items-start gap-2 text-[10px] leading-4 text-muted"><ShieldCheck size={13} className="mt-0.5 shrink-0 text-mint" /> Nutrition totals are calculated from the values you entered in your food library. They are not independently verified.</p>
       </section>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[1.4fr_1fr]">
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
         <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
           <div className="mb-5 flex items-center justify-between">
             <div><h3 className="font-semibold">This week</h3><p className="mt-1 text-xs text-muted">Food and training at a glance</p></div>
@@ -707,9 +707,9 @@ function FoodLibrary({ foods, onAdd, onEdit, onDelete }: { foods: Food[]; onAdd:
       {visibleFoods.length === 0 ? (
         <EmptyState icon={Apple} title={foods.length ? "No matching foods" : "Your library starts here"} detail={foods.length ? "Try a different search term." : "No pre-filled nutrition data. Add food details using a label or source you trust."} action={foods.length ? undefined : "Add a food"} onClick={onAdd} />
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {visibleFoods.map((food) => (
-            <article key={food.id} className="rounded-2xl border border-line bg-panel p-4 sm:p-5">
+            <article key={food.id} className="min-w-0 rounded-2xl border border-line bg-panel p-4 sm:p-5">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-lime/10 text-lime"><Apple size={17} /></div>
@@ -722,7 +722,7 @@ function FoodLibrary({ foods, onAdd, onEdit, onDelete }: { foods: Food[]; onAdd:
               </div>
               <div className="mt-4 flex items-center justify-between border-t border-line pt-3">
                 <div><p className="text-lg font-semibold">{formatNumber(food.calories_per_100g)} <span className="text-[10px] font-normal text-muted">kcal</span></p><p className="mt-0.5 text-[9px] text-muted">per 100 g</p></div>
-                <div className="flex flex-wrap justify-end gap-x-3 gap-y-1 text-[10px] text-muted">
+                <div className="flex min-w-0 flex-wrap justify-end gap-x-3 gap-y-1 text-[10px] text-muted">
                   <span><b className="font-medium text-white">{formatNumber(food.protein_g_per_100g)}g</b> protein</span>
                   <span><b className="font-medium text-white">{formatNumber(food.carbohydrates_g_per_100g)}g</b> carbs</span>
                   <span><b className="font-medium text-white">{formatNumber(food.fat_g_per_100g)}g</b> fat</span>
@@ -788,7 +788,7 @@ function FoodForm({ initialFood, busy, error, onSubmit }: { initialFood: Food | 
   return (
     <form onSubmit={submit} className="space-y-4">
       <p className="rounded-xl border border-amber-200/10 bg-amber-200/5 p-3 text-[11px] leading-5 text-muted">Use the nutrition values from your own label or source. These values will be marked as user-entered, not verified.</p>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Food name" required><input required maxLength={120} value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Rolled oats" className="input-dark" /></Field>
         <Field label="Brand (optional)"><input maxLength={120} value={form.brand} onChange={(e) => set("brand", e.target.value)} placeholder="Brand or source note" className="input-dark" /></Field>
       </div>
@@ -1214,7 +1214,7 @@ function WorkoutCard({ workout, onEdit, onRepeat, onDelete }: { workout: Workout
           <button onClick={onDelete} className="rounded-lg p-2 text-muted transition hover:bg-red-400/10 hover:text-red-300" aria-label={`Delete ${workout.name}`}><Trash2 size={14} /></button>
         </div>
       </div>
-      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+      <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
         {grouped.map(([exercise, sets]) => (
           <div key={exercise} className="rounded-xl bg-night px-3 py-2.5">
             <p className="text-xs font-medium">{exercise}</p>
@@ -1255,11 +1255,12 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
           <div><div className="flex items-center gap-2"><Target size={16} className="text-lime" /><h3 className="font-semibold">Daily and weekly targets</h3></div><p className="mt-2 text-xs text-muted">Targets are optional and editable whenever you need.</p></div>
           <button onClick={onEditTargets} className="button-secondary !min-h-9 !px-3">Edit targets</button>
         </div>
-        <div className="mt-5 grid gap-2 sm:grid-cols-2">{targetRows.map(([label, value]) => <div key={label} className="flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">{label}</span><span className="text-xs font-medium">{value}</span></div>)}</div>
+        <div className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2">{targetRows.map(([label, value]) => <div key={label} className="flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">{label}</span><span className="text-xs font-medium">{value}</span></div>)}</div>
       </section>
       <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="flex items-center gap-2"><Settings size={16} className="text-mint" /><h3 className="font-semibold">Units</h3></div>
         <div className="mt-4 flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">Weight and food portions</span><span className="rounded-full bg-mint/10 px-2.5 py-1 text-[10px] font-semibold text-mint">Metric · kg / g</span></div>
+        <div className="mt-2 flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">App version</span><span className="text-[11px] tabular-nums text-zinc-300">{__APP_VERSION__}</span></div>
       </section>
       <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="flex items-center gap-2"><ShieldCheck size={16} className="text-lime" /><h3 className="font-semibold">Your data</h3></div>
@@ -1301,7 +1302,7 @@ function EmptyState({ icon: Icon, title, detail, action, onClick }: { icon: type
 function ModalShell({ title, eyebrow, onClose, children }: { title: string; eyebrow: string; onClose: () => void; children: ReactNode }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="relative max-h-[calc(100dvh_-_env(safe-area-inset-top)_-_12px)] w-full overflow-y-auto overscroll-contain rounded-t-3xl border border-line bg-panel p-5 pb-[max(env(safe-area-inset-bottom),20px)] shadow-2xl sm:max-h-[94dvh] sm:max-w-[540px] sm:rounded-3xl sm:p-6">
+      <section className="relative max-h-[calc(100dvh_-_env(safe-area-inset-top)_-_12px)] w-full overflow-y-auto overflow-x-hidden overscroll-contain rounded-t-3xl border border-line bg-panel p-5 pb-[max(env(safe-area-inset-bottom),20px)] shadow-2xl sm:max-h-[94dvh] sm:max-w-[540px] sm:rounded-3xl sm:p-6">
         <div className="mb-5 flex items-start justify-between">
           <div><p className="text-[9px] font-bold tracking-[.2em] text-lime">{eyebrow}</p><h2 className="mt-1.5 text-xl font-semibold">{title}</h2></div>
           <button onClick={onClose} className="rounded-xl border border-line p-2 text-muted transition hover:bg-panel-raised hover:text-white" aria-label="Close"><X size={16} /></button>

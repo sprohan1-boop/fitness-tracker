@@ -93,7 +93,7 @@ function TrendsSection({ trends, range }: { trends: Trends; range: Range }) {
           </div>
         )}
         {(onCalories !== null || onProtein !== null) && logged.length > 0 && (
-          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
             {onCalories !== null && <Adherence label="Calories within ±10% of target" hit={onCalories} of={logged.length} />}
             {onProtein !== null && <Adherence label="Protein target reached" hit={onProtein} of={logged.length} />}
           </div>

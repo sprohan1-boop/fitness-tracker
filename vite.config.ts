@@ -5,12 +5,19 @@ import { VitePWA } from "vite-plugin-pwa";
 // GitHub Pages serves the app from /<repo-name>/; the deploy workflow sets BASE_PATH.
 const base = process.env.BASE_PATH || "/";
 
+// e.g. "2026-11-16 12:05 UTC": shown in Settings so you can tell which version the phone runs.
+const version = `${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
+
 export default defineConfig({
   base,
+  define: {
+    __APP_VERSION__: JSON.stringify(version),
+  },
   plugins: [
     react(),
     VitePWA({
       registerType: "autoUpdate",
+      injectRegister: false, // registered in src/main.tsx, with foreground update checks
       includeAssets: ["icon.svg", "apple-touch-icon.png"],
       manifest: {
         name: "Fitness Tracker",
