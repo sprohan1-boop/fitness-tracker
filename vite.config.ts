@@ -18,6 +18,17 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: false, // registered in src/main.tsx, with foreground update checks
+      workbox: {
+        // The ~1 MB food database isn't pre-downloaded with every update; it's cached the first
+        // time you search, then works offline (refreshed in the background when online).
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => url.pathname.endsWith("/foods-db.json"),
+            handler: "StaleWhileRevalidate",
+            options: { cacheName: "food-database", expiration: { maxEntries: 1 } },
+          },
+        ],
+      },
       includeAssets: ["icon.svg", "apple-touch-icon.png"],
       manifest: {
         name: "Fitness Tracker",

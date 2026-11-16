@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { fromCm, lengthUnit, toCm, usePrefs } from "./prefs";
 import type { ActivityLevel, EnergyEstimate, Fast, Food, Goal, Profile, Targets } from "./types";
-import { Field, FormError } from "./ui";
+import { AmountInput, Field, FormError } from "./ui";
 import { formatHours, formatNumber } from "./utils";
 
 // ---------- recipes ----------
@@ -60,16 +60,32 @@ export function RecipeForm({ foods, initial, busy, error, onSubmit }: {
         <p className="mb-2 text-xs font-medium text-zinc-300">Ingredients</p>
         <div className="space-y-2">
           {rows.map((row, index) => (
-            <div key={index} className="grid grid-cols-[minmax(0,1fr)_80px_30px] items-center gap-2">
-              <select value={row.food_id} onChange={(e) => update(index, "food_id", e.target.value)} className="input-dark !px-2.5" aria-label="Ingredient">
-                <option value="">Choose a food…</option>
-                {choices.map((food) => <option key={food.id} value={food.id}>{food.name}</option>)}
-              </select>
-              <div className="relative">
-                <input type="number" inputMode="decimal" min="0" step="any" value={row.grams} onChange={(e) => update(index, "grams", e.target.value)} placeholder="0" className="input-dark !pr-6 text-center" aria-label="Grams" />
-                <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted">g</span>
+            <div key={index} className="space-y-1.5 rounded-xl border border-line/70 p-2">
+              <div className="grid grid-cols-[minmax(0,1fr)_30px] items-center gap-2">
+                <select
+                  value={row.food_id}
+                  onChange={(e) => {
+                    // Default to one serving of the chosen food (or 100 g).
+                    const food = choices.find((item) => String(item.id) === e.target.value);
+                    setRows((current) => current.map((item, i) => (i === index ? { food_id: e.target.value, grams: food?.servings[0] ? String(food.servings[0].grams) : "100" } : item)));
+                  }}
+                  className="input-dark !px-2.5"
+                  aria-label="Ingredient"
+                >
+                  <option value="">Choose a food…</option>
+                  {choices.map((food) => <option key={food.id} value={food.id}>{food.name}</option>)}
+                </select>
+                <button type="button" onClick={() => setRows((current) => (current.length > 1 ? current.filter((_, i) => i !== index) : current))} className="rounded-lg p-2 text-muted hover:text-red-300" aria-label="Remove ingredient"><X size={14} /></button>
               </div>
-              <button type="button" onClick={() => setRows((current) => (current.length > 1 ? current.filter((_, i) => i !== index) : current))} className="rounded-lg p-2 text-muted hover:text-red-300" aria-label="Remove ingredient"><X size={14} /></button>
+              {row.food_id && (
+                <AmountInput
+                  key={row.food_id}
+                  grams={row.grams}
+                  servings={choices.find((food) => String(food.id) === row.food_id)?.servings ?? []}
+                  onChange={(grams) => update(index, "grams", grams)}
+                  label="Ingredient amount"
+                />
+              )}
             </div>
           ))}
         </div>

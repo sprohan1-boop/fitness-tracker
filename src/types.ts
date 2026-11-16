@@ -29,7 +29,7 @@ export type Cardio = { id: number; date: string; type: CardioType; minutes: numb
 export type Measurement = { id: number; date: string; waist_cm: number | null; hips_cm: number | null; chest_cm: number | null; arm_cm: number | null; thigh_cm: number | null; body_fat_pct: number | null };
 export type MeasureKey = Exclude<keyof Measurement, "id" | "date">;
 
-export type FoodSource = "user-entered" | "open-food-facts" | "recipe";
+export type FoodSource = "user-entered" | "open-food-facts" | "recipe" | "usda";
 
 export type ActivityLevel = "sedentary" | "light" | "moderate" | "very" | "extra";
 export type Goal = "lose" | "lose_slow" | "maintain" | "gain";

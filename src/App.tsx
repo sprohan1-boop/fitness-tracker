@@ -6,6 +6,7 @@ import {
   CalendarDays,
   ChefHat,
   Check,
+  Database,
   ClipboardList,
   Copy,
   ChevronLeft,
@@ -43,13 +44,15 @@ import { RestTimer, unlockAudio } from "./RestTimer";
 const ProgressPage = lazy(() => import("./Progress").then((module) => ({ default: module.ProgressPage })));
 const WeekChart = lazy(() => import("./WeekChart"));
 import { SwipeToDelete } from "./Swipe";
-import { Field, FormError, ModalShell, NumberField } from "./ui";
+import { AmountInput, Field, FormError, ModalShell, NumberField } from "./ui";
 import { FastingCard, RecipeForm, TargetCalculator } from "./Nutrition";
 import { RoutineCard, RoutineForm, TodayPlans, weekdayIndex } from "./Training";
 import { WeekSummaryCard, weekStartOf } from "./Insights";
 import { suggestIncrease } from "./training-logic";
 import { CardioCard, CardioForm, HabitsCard, HabitsManager, SleepCard, SleepForm, StepsCard, cardioLabel } from "./Health";
 import { BarcodeScanner, lookupBarcode } from "./Barcode";
+import { foodFromDb, loadFoodDb, searchFoodDb } from "./foodDb";
+import type { DbFood } from "./foodDb";
 import { fromKg, setPrefs, toKg, usePrefs } from "./prefs";
 import { currentPrefs } from "./prefs";
 const prefsUnit = () => currentPrefs().unit;
@@ -495,6 +498,16 @@ export default function App() {
             date={selectedDate}
             dayLabel={dayLabel}
             onAddFood={() => openFoodEditor()}
+            onAddFromDb={async (item) => {
+              try {
+                const food = await api.createFood(foodFromDb(item));
+                setFoods(await api.foods());
+                return food;
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : "Couldn't add that food.");
+                return null;
+              }
+            }}
             onSubmit={(body) => runAction(() => api.createMeal(body), `Meal added to ${dayLabel.toLowerCase() === "today" ? "today's" : `${dayLabel}'s`} log.`)}
           />
         </ModalShell>
@@ -1055,7 +1068,7 @@ function FoodLibrary({ foods, onAdd, onScan, onRecipe, onEdit, onDelete }: { foo
                   <span><b className="font-medium text-white">{formatNumber(food.fiber_g_per_100g)}g</b> fiber</span>
                 </div>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>{food.source === "open-food-facts" ? "From Open Food Facts · check against the label" : food.source === "recipe" ? "Recipe · from your ingredients" : "Manually entered · not independently verified"}</span></div>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>{food.source === "open-food-facts" ? "From Open Food Facts · check against the label" : food.source === "recipe" ? "Recipe · from your ingredients" : food.source === "usda" ? "From the USDA food database" : "Manually entered · not independently verified"}</span></div>
               {food.notes && <p className="mt-2 text-[10px] leading-4 text-muted">{food.notes}</p>}
             </article>
             </SwipeToDelete>
@@ -1090,6 +1103,33 @@ function FoodForm({ initialFood, existingFoods, autoScan, busy, error, onSubmit 
   const [lookingUp, setLookingUp] = useState(false);
   const [scanInfo, setScanInfo] = useState("");
   const [source, setSource] = useState<FoodSource>("user-entered");
+  const [dbOpen, setDbOpen] = useState(false);
+  const [dbQuery, setDbQuery] = useState("");
+  const dbResults = useFoodDbSearch(dbOpen ? dbQuery : "");
+
+  function fillFromDb(item: DbFood) {
+    const entry = foodFromDb(item);
+    const text = (value: number | null | undefined) => (value == null ? "" : String(value));
+    setForm((current) => ({
+      ...current,
+      name: entry.name,
+      brand: "",
+      preparation: entry.preparation,
+      calories_per_100g: text(entry.calories_per_100g),
+      protein_g_per_100g: text(entry.protein_g_per_100g),
+      carbohydrates_g_per_100g: text(entry.carbohydrates_g_per_100g),
+      fat_g_per_100g: text(entry.fat_g_per_100g),
+      fiber_g_per_100g: text(entry.fiber_g_per_100g),
+      sugar_g_per_100g: text(entry.sugar_g_per_100g),
+      sat_fat_g_per_100g: text(entry.sat_fat_g_per_100g),
+      sodium_mg_per_100g: text(entry.sodium_mg_per_100g),
+      notes: entry.notes ?? "",
+    }));
+    setServings(entry.servings.map((serving) => ({ label: serving.label, grams: String(serving.grams) })));
+    setSource("usda");
+    setDbOpen(false);
+    setScanInfo("Filled in from the USDA food database. You can rename it (e.g. \"Chicken breast, cooked\") and adjust anything before saving.");
+  }
 
   const handleBarcode = useCallback(async (barcode: string) => {
     setScanning(false);
@@ -1172,9 +1212,21 @@ function FoodForm({ initialFood, existingFoods, autoScan, busy, error, onSubmit 
     <form onSubmit={submit} className="space-y-4">
       {scanning && <BarcodeScanner onDetected={handleBarcode} onClose={() => setScanning(false)} />}
       {!initialFood && (
-        <button type="button" onClick={() => setScanning(true)} disabled={lookingUp} className="button-secondary w-full">
-          {lookingUp ? <><Loader2 size={15} className="animate-spin" /> Looking up product…</> : <><ScanBarcode size={16} /> Scan barcode</>}
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" onClick={() => setScanning(true)} disabled={lookingUp} className="button-secondary">
+            {lookingUp ? <><Loader2 size={15} className="animate-spin" /> Looking up…</> : <><ScanBarcode size={16} /> Scan barcode</>}
+          </button>
+          <button type="button" onClick={() => setDbOpen((open) => !open)} className={`button-secondary ${dbOpen ? "!border-lime/50 !text-lime" : ""}`}><Database size={15} /> Food database</button>
+        </div>
+      )}
+      {dbOpen && (
+        <div className="space-y-2 rounded-2xl bg-night p-3">
+          <div className="flex items-center gap-2 rounded-xl border border-line bg-panel px-3">
+            <Search size={15} className="shrink-0 text-muted" />
+            <input autoFocus value={dbQuery} onChange={(e) => setDbQuery(e.target.value)} placeholder="e.g. chicken breast cooked" className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted" aria-label="Search food database" />
+          </div>
+          {dbQuery.trim().length >= 2 && <DbResults results={dbResults} adding={null} onPick={fillFromDb} />}
+        </div>
       )}
       {scanInfo ? (
         <p className="rounded-xl border border-mint/20 bg-mint/5 p-3 text-[11px] leading-5 text-zinc-300">{scanInfo}</p>
@@ -1241,26 +1293,9 @@ function MealTypePicker({ value, onChange }: { value: string; onChange: (value: 
   );
 }
 
+/** Quantity × serving (or grams). Remounted per food via `key`, so it starts from that food's servings. */
 function PortionPicker({ grams, onChange, servings }: { grams: string; onChange: (grams: string) => void; servings: Serving[] }) {
-  const chips = [
-    ...servings.map((serving) => ({ key: `s-${serving.label}`, label: `${serving.label} · ${formatNumber(serving.grams)} g`, grams: serving.grams, saved: true })),
-    ...[50, 100, 150, 200].map((value) => ({ key: `g-${value}`, label: `${value} g`, grams: value, saved: false })),
-  ];
-  return (
-    <div>
-      <div className="mb-2 flex flex-wrap gap-1.5">
-        {chips.map((chip) => (
-          <button key={chip.key} type="button" onClick={() => onChange(String(chip.grams))} className={`rounded-full border px-3 py-1.5 text-[11px] font-medium transition ${Number(grams) === chip.grams ? "border-lime bg-lime/10 text-lime" : chip.saved ? "border-lime/30 text-zinc-200" : "border-line text-muted hover:text-white"}`}>
-            {chip.label}
-          </button>
-        ))}
-      </div>
-      <div className="relative">
-        <input type="number" inputMode="decimal" min="0.1" max="10000" step="any" value={grams} onChange={(e) => onChange(e.target.value)} className="input-dark pr-10" aria-label="Portion in grams" />
-        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted">g</span>
-      </div>
-    </div>
-  );
+  return <AmountInput grams={grams} servings={servings} onChange={onChange} label="Portion" />;
 }
 
 function NutritionPreview({ calories, protein, carbs, fat, fiber, grams }: { calories: number; protein: number; carbs: number; fat: number; fiber: number; grams: number }) {
@@ -1292,7 +1327,7 @@ function FoodChoice({ food, selected, onSelect }: { food: Food; selected: boolea
   );
 }
 
-function MealForm({ foods, recentFoodIds, busy, error, date, dayLabel, onAddFood, onSubmit }: { foods: Food[]; recentFoodIds: number[]; busy: boolean; error: string; date: string; dayLabel: string; onAddFood: () => void; onSubmit: (body: { food_id: number; date: string; meal_type: string; portion_g: number }) => void }) {
+function MealForm({ foods, recentFoodIds, busy, error, date, dayLabel, onAddFood, onAddFromDb, onSubmit }: { foods: Food[]; recentFoodIds: number[]; busy: boolean; error: string; date: string; dayLabel: string; onAddFood: () => void; onAddFromDb: (item: DbFood) => Promise<Food | null>; onSubmit: (body: { food_id: number; date: string; meal_type: string; portion_g: number }) => void }) {
   const recent = recentFoodIds.map((id) => foods.find((food) => food.id === id)).filter((food): food is Food => Boolean(food));
   const firstFood = recent[0] ?? (foods.length === 1 ? foods[0] : undefined);
   const [search, setSearch] = useState("");
@@ -1305,6 +1340,18 @@ function MealForm({ foods, recentFoodIds, busy, error, date, dayLabel, onAddFood
   const matches = term ? foods.filter((food) => `${food.name} ${food.brand ?? ""}`.toLowerCase().includes(term)) : foods;
   const grams = Number(portion);
   const multiplier = Number.isFinite(grams) && grams > 0 ? grams / 100 : 0;
+  const dbResults = useFoodDbSearch(term);
+  const [adding, setAdding] = useState<string | null>(null);
+
+  /** Adds a database food to the library (or reuses one with the same name) and selects it. */
+  async function chooseFromDb(item: DbFood) {
+    const existing = foods.find((food) => food.name.toLowerCase() === item.name.toLowerCase());
+    if (existing) { choose(existing); return; }
+    setAdding(item.name);
+    const food = await onAddFromDb(item);
+    setAdding(null);
+    if (food) choose(food);
+  }
 
   function choose(food: Food) {
     setFoodId(food.id);
@@ -1321,22 +1368,11 @@ function MealForm({ foods, recentFoodIds, busy, error, date, dayLabel, onAddFood
     onSubmit({ food_id: selectedFood.id, date, meal_type: mealType, portion_g: grams });
   }
 
-  if (foods.length === 0) {
-    return (
-      <div className="rounded-2xl border border-line bg-night p-4 text-center">
-        <Apple className="mx-auto text-lime" size={22} />
-        <p className="mt-3 text-sm font-medium">Your food library is empty</p>
-        <p className="mt-1 text-xs text-muted">Create a food entry with nutrition values you trust.</p>
-        <button type="button" className="button-secondary mt-4" onClick={onAddFood}><Plus size={14} /> Add a food</button>
-      </div>
-    );
-  }
-
   return (
     <form onSubmit={submit} className="space-y-4">
       <div className="flex items-center gap-2 rounded-xl border border-line bg-night px-3">
         <Search size={15} className="shrink-0 text-muted" />
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search your foods" className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted" aria-label="Search foods" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search foods, e.g. chicken breast cooked" className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted" aria-label="Search foods" />
         {search && <button type="button" onClick={() => setSearch("")} className="text-muted" aria-label="Clear search"><X size={14} /></button>}
       </div>
 
@@ -1350,18 +1386,19 @@ function MealForm({ foods, recentFoodIds, busy, error, date, dayLabel, onAddFood
         <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">{term ? `${matches.length} found` : "All foods"}</p>
         {matches.length === 0 ? (
           <div className="rounded-xl border border-dashed border-line p-4 text-center text-xs text-muted">
-            No foods match "{search}".
-            <button type="button" onClick={onAddFood} className="ml-1 font-semibold text-lime">Add it</button>
+            {foods.length === 0 ? "Your library is empty. Search above to use the food database," : `None of your foods match "${search}".`}
+            <button type="button" onClick={onAddFood} className="ml-1 font-semibold text-lime">{foods.length === 0 ? "or add your own" : "Add your own"}</button>
           </div>
         ) : (
           <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">{matches.map((food) => <FoodChoice key={food.id} food={food} selected={food.id === foodId} onSelect={() => choose(food)} />)}</div>
         )}
       </div>
+      {term.length >= 2 && <DbResults results={dbResults} adding={adding} onPick={(item) => void chooseFromDb(item)} />}
 
       {selectedFood && (
         <>
           <Field label="Meal"><MealTypePicker value={mealType} onChange={setMealType} /></Field>
-          <Field label="Portion"><PortionPicker grams={portion} onChange={setPortion} servings={selectedFood.servings} /></Field>
+          <Field label="Portion"><PortionPicker key={selectedFood.id} grams={portion} onChange={setPortion} servings={selectedFood.servings} /></Field>
           {multiplier > 0 && (
             <NutritionPreview
               calories={selectedFood.calories_per_100g * multiplier}
@@ -1377,6 +1414,45 @@ function MealForm({ foods, recentFoodIds, busy, error, date, dayLabel, onAddFood
       {(validation || error) && <FormError message={validation || error} />}
       <button disabled={busy || !selectedFood} className="button-primary w-full disabled:opacity-60">{busy ? "Saving…" : `Add to ${dayLabel === "Today" ? "today" : dayLabel}`}</button>
     </form>
+  );
+}
+
+/** Searches the built-in food database as you type (downloaded on first use). */
+function useFoodDbSearch(term: string) {
+  const [state, setState] = useState<{ status: "idle" | "loading" | "ready" | "error"; results: DbFood[] }>({ status: "idle", results: [] });
+  useEffect(() => {
+    if (term.trim().length < 2) { setState({ status: "idle", results: [] }); return; }
+    let live = true;
+    setState((current) => ({ ...current, status: "loading" }));
+    const id = window.setTimeout(() => {
+      loadFoodDb()
+        .then((db) => { if (live) setState({ status: "ready", results: searchFoodDb(db, term) }); })
+        .catch(() => { if (live) setState({ status: "error", results: [] }); });
+    }, 200);
+    return () => { live = false; window.clearTimeout(id); };
+  }, [term]);
+  return state;
+}
+
+function DbResults({ results, adding, onPick }: { results: ReturnType<typeof useFoodDbSearch>; adding: string | null; onPick: (item: DbFood) => void }) {
+  return (
+    <div>
+      <p className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted"><Database size={11} /> Food database (USDA)</p>
+      {results.status === "loading" && <p className="text-xs text-muted"><Loader2 size={13} className="mr-1.5 inline animate-spin" />Searching…</p>}
+      {results.status === "error" && <p className="text-xs text-red-200">Couldn't load the food database. Check your connection; it works offline after the first time.</p>}
+      {results.status === "ready" && results.results.length === 0 && <p className="text-xs text-muted">No matches. Try simpler words, e.g. "chicken breast", "rice cooked", "lentils".</p>}
+      <div className="space-y-1.5">
+        {results.results.map((item) => (
+          <button key={item.name} type="button" disabled={adding !== null} onClick={() => onPick(item)} className="flex w-full items-center gap-3 rounded-xl border border-dashed border-line px-3 py-2.5 text-left transition hover:border-lime/40 disabled:opacity-60">
+            <div className="min-w-0 flex-1">
+              <p className="line-clamp-2 text-[13px] leading-5">{item.name}</p>
+              <p className="mt-0.5 text-[10px] text-muted">{formatNumber(item.kcal)} kcal · {formatNumber(item.protein)} g protein per 100 g{item.portions[0] ? ` · ${item.portions[0].label} = ${formatNumber(item.portions[0].grams)} g` : ""}</p>
+            </div>
+            {adding === item.name ? <Loader2 size={15} className="shrink-0 animate-spin text-lime" /> : <Plus size={15} className="shrink-0 text-lime" />}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

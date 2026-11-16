@@ -42,6 +42,8 @@ Open `http://localhost:5173`. Production build: `npm run build`. For a sub-path 
 - Fast meal logging: search, recent foods, quick portions; meals keep a nutrition snapshot and can be edited later.
 - Workout logging with sets, reps and kg; repeat a past session, "last time" numbers, exercise suggestions, and a rest timer.
 - Progress tab: food and workout streaks, daily averages and target adherence, calories chart, body weight with a 7-day trend, and per-exercise charts (heaviest set, volume).
+- Built-in food database: ~7,800 generic foods from USDA FoodData Central (SR Legacy, public domain) with nutrients and portion sizes. Search it from Log a meal (one tap adds the food) or Add food. Common Indian names (dal, roti, curd, chana…) map to USDA terms. `public/foods-db.json` is generated from the USDA download by a small script; it's cached on first use and works offline.
+- Amounts as quantity × serving (e.g. 2 × biscuit) or grams, when logging meals and in recipes.
 - Barcode scanning: fills in a food from Open Food Facts (only the barcode number is sent), marked "check against the label"; a barcode can also be typed.
 - Water tracking against an optional daily target, and a short note per day.
 - Sleep log (bed/wake time and quality, filed under the morning you woke), daily steps with an optional target, and a habits/supplements checklist with streaks.

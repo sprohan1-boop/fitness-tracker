@@ -318,7 +318,7 @@ export const api = {
   createFood: (body: FoodBody & { source?: FoodSource }) =>
     mutate((state) => {
       const { source, ...rest } = body;
-      const food: Food = { ...cleanFood(rest), id: state.next_id.food++, source: source === "open-food-facts" ? source : "user-entered", is_verified: false };
+      const food: Food = { ...cleanFood(rest), id: state.next_id.food++, source: source === "open-food-facts" || source === "usda" ? source : "user-entered", is_verified: false };
       state.foods.push(food);
       return food;
     }),
