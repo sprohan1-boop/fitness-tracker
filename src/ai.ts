@@ -84,6 +84,8 @@ export type AiFoodItem = {
 };
 
 const NUMBER = { type: "number" } as const;
+// The model gives per-100 g values and the edible weight; the app does the arithmetic (small models
+// slip on multiplication) and checks calories against the macros.
 const MEAL_SCHEMA = {
   type: "object",
   properties: {
@@ -92,17 +94,17 @@ const MEAL_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          name: { type: "string", description: "Short everyday name, e.g. 'Dal tadka' or 'Chapati'" },
-          grams: { ...NUMBER, description: "Estimated weight eaten, in grams" },
-          kcal: { ...NUMBER, description: "Calories for that amount" },
-          protein_g: NUMBER,
-          carbs_g: NUMBER,
-          fat_g: NUMBER,
-          fiber_g: NUMBER,
+          name: { type: "string", description: "Short everyday name, e.g. 'Chicken curry (meat only)' or 'Chapati'" },
+          edible_grams: { ...NUMBER, description: "Weight actually eaten in grams, after removing bones or anything the user excluded" },
+          kcal_per_100g: NUMBER,
+          protein_per_100g: NUMBER,
+          carbs_per_100g: NUMBER,
+          fat_per_100g: NUMBER,
+          fiber_per_100g: NUMBER,
           confidence: { type: "string", enum: ["high", "medium", "low"] },
-          note: { type: "string", description: "One short line on assumptions, e.g. 'assumed 1 tsp ghee'. Empty if none." },
+          note: { type: "string", description: "One short line on key assumptions, e.g. '200 g with bone = ~140 g meat; 1 tsp oil'. Empty if none." },
         },
-        required: ["name", "grams", "kcal", "protein_g", "carbs_g", "fat_g", "fiber_g", "confidence", "note"],
+        required: ["name", "edible_grams", "kcal_per_100g", "protein_per_100g", "carbs_per_100g", "fat_per_100g", "fiber_per_100g", "confidence", "note"],
         additionalProperties: false,
       },
     },
@@ -111,24 +113,63 @@ const MEAL_SCHEMA = {
   additionalProperties: false,
 };
 
-const MEAL_SYSTEM = `You estimate the nutrition of food for a personal food log. The user is often eating Indian home cooking, so assume typical Indian home recipes and portions (a katori is about 150 g, a chapati about 40 g, a cup of chai about 150 ml with milk and sugar) unless they say otherwise.
-Return one item per distinct food. Give the amount actually eaten in grams and the nutrition totals for that amount (not per 100 g). If a portion or recipe is uncertain, choose the most likely option, set confidence accordingly, and state the assumption briefly in note. Do not invent foods that aren't described or visible.`;
+const MEAL_SYSTEM = `You estimate the nutrition of food for a personal food log. The user often eats Indian home cooking: assume typical Indian home recipes and portions (a katori is about 150 g, a chapati about 40 g, a cup of chai about 150 ml with milk and sugar) unless told otherwise.
+
+Return one item per distinct food, with the edible weight eaten and nutrition per 100 g of that food as eaten (cooked, with its share of oil). The app multiplies them out.
+
+Rules:
+- Weights "with bone" / "bone-in" include bone. Edible part: chicken curry or tandoori pieces about 70%, drumsticks about 65%, wings about 50%, mutton on the bone about 65%, fish steaks about 80%. Report edible_grams for the meat only and say so in note.
+- If the user excludes the curry/gravy, count only the solid pieces (with oil absorbed in cooking). Otherwise include a typical amount of gravy as a separate item or within the dish, and say which.
+- Per-100 g values must be realistic for the cooked food: cooked skinless chicken is roughly 25-31 g protein per 100 g; calories should roughly equal 4 x protein + 4 x carbs + 9 x fat.
+- When reference values from a food database are given, use them as the base and adjust only for cooking method, oil and recipe.
+- If a portion or recipe is uncertain, choose the most likely option, set confidence accordingly, and state the assumption briefly in note. Do not invent foods that aren't described or visible.`;
+
+type RawItem = { name: string; edible_grams: number; kcal_per_100g: number; protein_per_100g: number; carbs_per_100g: number; fat_per_100g: number; fiber_per_100g: number; confidence: AiFoodItem["confidence"]; note: string };
 
 function toItems(message: Anthropic.Message): AiFoodItem[] {
   checkStop(message);
-  const parsed = JSON.parse(firstText(message)) as { items: AiFoodItem[] };
-  return parsed.items.filter((item) => item.grams > 0 && item.kcal >= 0);
+  const parsed = JSON.parse(firstText(message)) as { items: RawItem[] };
+  return parsed.items
+    .filter((item) => item.edible_grams > 0 && item.kcal_per_100g >= 0)
+    .map((item) => {
+      const f = item.edible_grams / 100;
+      const protein = Math.max(0, item.protein_per_100g);
+      const carbs = Math.max(0, item.carbs_per_100g);
+      const fat = Math.max(0, item.fat_per_100g);
+      // Calories should match the macros (4/4/9); if the model's figure is far off, trust the macros.
+      const fromMacros = protein * 4 + carbs * 4 + fat * 9;
+      const kcal100 = fromMacros > 0 && Math.abs(item.kcal_per_100g - fromMacros) > fromMacros * 0.2 ? fromMacros : item.kcal_per_100g;
+      return {
+        name: item.name,
+        grams: Math.round(item.edible_grams),
+        kcal: Math.round(kcal100 * f),
+        protein_g: Math.round(protein * f * 10) / 10,
+        carbs_g: Math.round(carbs * f * 10) / 10,
+        fat_g: Math.round(fat * f * 10) / 10,
+        fiber_g: Math.round(Math.max(0, item.fiber_per_100g) * f * 10) / 10,
+        confidence: item.confidence,
+        note: item.note,
+      };
+    });
 }
 
-/** Estimates foods from a typed description, e.g. "dal makhani and 2 butter naan". */
-export async function estimateMealFromText(description: string): Promise<AiFoodItem[]> {
+/** A database food the model can anchor on (values per 100 g). */
+export type AiReference = { name: string; kcal: number; protein: number; carbs: number; fat: number };
+
+/** Estimates foods from a typed description, e.g. "chicken curry 200g with bone". */
+export async function estimateMealFromText(description: string, references: AiReference[] = []): Promise<AiFoodItem[]> {
   const ai = await client();
+  const reference = references.length
+    ? `\n\nReference values from the USDA food database (per 100 g), for the closest plain foods:\n${references
+        .map((r) => `- ${r.name}: ${Math.round(r.kcal)} kcal, ${r.protein} g protein, ${r.carbs} g carbs, ${r.fat} g fat`)
+        .join("\n")}`
+    : "";
   const message = await ai.messages.create({
     model: MODEL,
-    max_tokens: 4000,
-    output_config: { effort: "low", format: { type: "json_schema", schema: MEAL_SCHEMA } },
+    max_tokens: 8000,
+    output_config: { effort: "medium", format: { type: "json_schema", schema: MEAL_SCHEMA } },
     system: MEAL_SYSTEM,
-    messages: [{ role: "user", content: `What I ate: ${description}` }],
+    messages: [{ role: "user", content: `What I ate: ${description}${reference}` }],
   });
   return toItems(message);
 }
@@ -138,7 +179,7 @@ export async function estimateMealFromPhoto(jpegBase64: string, note: string): P
   const ai = await client();
   const message = await ai.messages.create({
     model: MODEL,
-    max_tokens: 4000,
+    max_tokens: 8000,
     output_config: { effort: "medium", format: { type: "json_schema", schema: MEAL_SCHEMA } },
     system: `${MEAL_SYSTEM}\nFor photos, judge portions from visual cues such as plate size (a dinner plate is about 26 cm), bowls and cutlery.`,
     messages: [{

@@ -3,7 +3,7 @@
 import { Camera, ChevronDown, Loader2, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { estimateMealFromPhoto, estimateMealFromText, friendlyError, photoToJpegBase64 } from "./ai";
-import type { AiFoodItem } from "./ai";
+import type { AiFoodItem, AiReference } from "./ai";
 import { loadFoodDb } from "./foodDb";
 import type { DbFood } from "./foodDb";
 import { choiceName, choiceServings, gramsFor, nutritionFor, parseItem, quickLog } from "./quickLog";
@@ -85,7 +85,17 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
     setAiBusy("text");
     setAiError("");
     try {
-      const items = await estimateMealFromText(unmatched.map((line) => line.text).join(", "));
+      // Give the AI the closest database/library foods as anchors (e.g. cooked chicken for "chicken curry").
+      const references: AiReference[] = [];
+      for (const line of unmatched) {
+        for (const alternative of line.alternatives.slice(0, 2)) {
+          const n = nutritionFor(alternative, 100);
+          if (!references.some((r) => r.name === choiceName(alternative))) {
+            references.push({ name: choiceName(alternative), kcal: n.kcal, protein: Math.round(n.protein * 10) / 10, carbs: Math.round(n.carbs * 10) / 10, fat: Math.round(n.fat * 10) / 10 });
+          }
+        }
+      }
+      const items = await estimateMealFromText(unmatched.map((line) => line.text).join(", "), references.slice(0, 6));
       // Replace the lines the free matcher couldn't place with the AI's estimates.
       setAiCoveredText(text);
       setLines((current) => [...current.filter((line) => line.choice), ...items.map((item) => aiLine(item, item.name))]);

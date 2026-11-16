@@ -205,7 +205,7 @@ export function quickLog(input: string, library: Food[], db: DbFood[] | null): Q
       grams: grams === null ? "" : String(grams),
       estimatedAmount: amount.estimated || withBone,
       note,
-      partial: dropped.length ? dropped.join(" ") : null,
+      partial: dropped.length ? [...new Set(dropped)].join(" ") : null,
     };
   });
 }
