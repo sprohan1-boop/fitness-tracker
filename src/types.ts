@@ -5,11 +5,16 @@ export type Targets = {
   fat_g: number | null;
   fiber_g: number | null;
   workouts_per_week: number | null;
+  water_ml: number | null;
 };
 
 export type Serving = { label: string; grams: number };
 
 export type BackupStatus = { last_backup_at: number | null; has_data: boolean };
+
+export type DayLog = { water_ml: number; note: string };
+
+export type FoodSource = "user-entered" | "open-food-facts";
 
 export type BodyWeight = { id: number; date: string; weight_kg: number };
 

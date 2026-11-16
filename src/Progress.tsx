@@ -3,16 +3,28 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "./api";
+import { SwipeToDelete } from "./Swipe";
+import { chartColors, fromKg, resolvedTheme, toKg, usePrefs } from "./prefs";
 import type { BodyWeight, ExercisePoint, ExerciseSummary, Trends } from "./types";
 import { addDays, dateLabel, formatNumber, localDate, shortDate } from "./utils";
 
-const COLORS = { lime: "#C4F36A", mint: "#8BE0B0", amber: "#FCD34D", grid: "#2C3530", muted: "#87938C" };
-const AXIS_TICK = { fill: COLORS.muted, fontSize: 10 };
-const TOOLTIP_STYLE = { background: "#202824", border: "1px solid #35413A", borderRadius: 12, color: "#F5F7F2", fontSize: 12 };
+/** Chart colours and styles for the current theme. */
+function useChartTheme() {
+  const prefs = usePrefs();
+  const colors = chartColors(resolvedTheme(prefs.theme));
+  return {
+    unit: prefs.unit,
+    COLORS: colors,
+    AXIS_TICK: { fill: colors.muted, fontSize: 10 },
+    TOOLTIP_STYLE: { background: colors.tooltipBg, border: `1px solid ${colors.tooltipBorder}`, borderRadius: 12, color: colors.tooltipText, fontSize: 12 },
+  };
+}
 const RANGES = [7, 30, 90] as const;
 type Range = (typeof RANGES)[number];
 
-export function ProgressPage({ onError }: { onError: (message: string) => void }) {
+type UndoableDelete = (action: () => Promise<unknown>, message: string) => Promise<void>;
+
+export function ProgressPage({ version, onError, onUndoableDelete }: { version: number; onError: (message: string) => void; onUndoableDelete: UndoableDelete }) {
   const [range, setRange] = useState<Range>(30);
   const [trends, setTrends] = useState<Trends | null>(null);
   const [weights, setWeights] = useState<BodyWeight[]>([]);
@@ -27,7 +39,7 @@ export function ProgressPage({ onError }: { onError: (message: string) => void }
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : "Could not load your progress.");
     }
-  }, [range, onError]);
+  }, [range, onError, version]); // version: reload after any change elsewhere (e.g. Undo)
 
   useEffect(() => { void load(); }, [load]);
 
@@ -49,7 +61,7 @@ export function ProgressPage({ onError }: { onError: (message: string) => void }
       </div>
 
       {trends && <TrendsSection trends={trends} range={range} />}
-      <WeightSection weights={weights} range={range} onChanged={load} onError={onError} />
+      <WeightSection weights={weights} range={range} onChanged={load} onError={onError} onDelete={(entry) => void onUndoableDelete(() => api.deleteWeight(entry.id), `Weigh-in from ${dateLabel(entry.date)} deleted.`)} />
       <ExerciseSection exercises={exercises} />
     </div>
   );
@@ -67,6 +79,7 @@ function TrendsSection({ trends, range }: { trends: Trends; range: Range }) {
   const onCalories = calorieTarget ? logged.filter((day) => Math.abs(day.calories - calorieTarget) <= calorieTarget * 0.1).length : null;
   const onProtein = proteinTarget ? logged.filter((day) => day.protein_g >= proteinTarget).length : null;
   const chartData = trends.days.map((day) => ({ ...day, label: shortDate(day.date) }));
+  const { COLORS, AXIS_TICK, TOOLTIP_STYLE } = useChartTheme();
 
   return (
     <>
@@ -108,7 +121,7 @@ function TrendsSection({ trends, range }: { trends: Trends; range: Range }) {
               <CartesianGrid vertical={false} stroke={COLORS.grid} strokeDasharray="3 5" />
               <XAxis dataKey="label" axisLine={false} tickLine={false} tick={AXIS_TICK} interval="preserveStartEnd" minTickGap={18} />
               <YAxis axisLine={false} tickLine={false} tick={AXIS_TICK} width={48} />
-              <Tooltip cursor={{ fill: "rgba(255,255,255,.03)" }} contentStyle={TOOLTIP_STYLE} formatter={(value) => [`${formatNumber(Number(value))} kcal`, "Food"]} />
+              <Tooltip cursor={{ fill: COLORS.cursor }} contentStyle={TOOLTIP_STYLE} formatter={(value) => [`${formatNumber(Number(value))} kcal`, "Food"]} />
               {calorieTarget && <ReferenceLine y={calorieTarget} stroke={COLORS.amber} strokeDasharray="5 4" />}
               <Bar dataKey="calories" fill={COLORS.lime} radius={[4, 4, 0, 0]} maxBarSize={22} />
             </BarChart>
@@ -161,26 +174,27 @@ function withTrend(weights: BodyWeight[]) {
   });
 }
 
-function WeightSection({ weights, range, onChanged, onError }: { weights: BodyWeight[]; range: Range; onChanged: () => Promise<void>; onError: (message: string) => void }) {
+function WeightSection({ weights, range, onChanged, onError, onDelete }: { weights: BodyWeight[]; range: Range; onChanged: () => Promise<void>; onError: (message: string) => void; onDelete: (entry: BodyWeight) => void }) {
   const today = localDate();
-  const todays = weights.find((entry) => entry.date === today);
-  const [value, setValue] = useState(todays ? String(todays.weight_kg) : "");
+  const { unit, COLORS, AXIS_TICK, TOOLTIP_STYLE } = useChartTheme();
+  const [value, setValue] = useState("");
   const [date, setDate] = useState(today);
   const [busy, setBusy] = useState(false);
 
   const from = addDays(today, -(range - 1));
   // Include the entry just before the range so the line doesn't start mid-air.
   const inRange = useMemo(() => {
-    const series = withTrend(weights);
+    // Shown in the chosen unit; stored in kg.
+    const series = withTrend(weights).map((entry) => ({ ...entry, weight_kg: fromKg(entry.weight_kg, unit), trend: fromKg(entry.trend, unit) }));
     const firstIndex = series.findIndex((entry) => entry.date >= from);
     return firstIndex < 0 ? [] : series.slice(Math.max(0, firstIndex - 1));
-  }, [weights, from]);
+  }, [weights, from, unit]);
   const latest = weights[weights.length - 1];
   const change = inRange.length >= 2 ? inRange[inRange.length - 1].trend - inRange[0].trend : null;
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    const kg = Number(value.replace(",", "."));
+    const kg = toKg(Number(value.replace(",", ".")), unit);
     setBusy(true);
     try {
       await api.saveWeight(date, kg);
@@ -201,11 +215,11 @@ function WeightSection({ weights, range, onChanged, onError }: { weights: BodyWe
         </div>
         {latest && (
           <div className="text-right">
-            <p><span className="text-2xl font-semibold">{formatNumber(latest.weight_kg)}</span> <span className="text-xs text-muted">kg</span></p>
+            <p><span className="text-2xl font-semibold">{formatNumber(fromKg(latest.weight_kg, unit))}</span> <span className="text-xs text-muted">{unit}</span></p>
             {change !== null && (
               <p className="mt-0.5 flex items-center justify-end gap-1 text-[11px] text-zinc-300">
                 {change <= 0 ? <TrendingDown size={12} /> : <TrendingUp size={12} />}
-                {change > 0 ? "+" : ""}{formatNumber(change)} kg trend, {range} days
+                {change > 0 ? "+" : ""}{formatNumber(change)} {unit} trend, {range} days
               </p>
             )}
           </div>
@@ -214,8 +228,8 @@ function WeightSection({ weights, range, onChanged, onError }: { weights: BodyWe
 
       <form onSubmit={save} className="flex flex-wrap items-end gap-2">
         <label className="min-w-[110px] flex-1">
-          <span className="mb-1.5 block text-[11px] font-medium text-zinc-300">Weight · kg</span>
-          <input type="number" inputMode="decimal" step="0.1" min="20" max="400" value={value} onChange={(e) => setValue(e.target.value)} placeholder="e.g. 72.4" className="input-dark" required />
+          <span className="mb-1.5 block text-[11px] font-medium text-zinc-300">Weight · {unit}</span>
+          <input type="number" inputMode="decimal" step="0.1" min="0" value={value} onChange={(e) => setValue(e.target.value)} placeholder={unit === "lb" ? "e.g. 160.2" : "e.g. 72.4"} className="input-dark" required />
         </label>
         <label className="min-w-[140px] flex-1">
           <span className="mb-1.5 block text-[11px] font-medium text-zinc-300">Date</span>
@@ -231,7 +245,7 @@ function WeightSection({ weights, range, onChanged, onError }: { weights: BodyWe
               <CartesianGrid vertical={false} stroke={COLORS.grid} strokeDasharray="3 5" />
               <XAxis dataKey="label" axisLine={false} tickLine={false} tick={AXIS_TICK} interval="preserveStartEnd" minTickGap={18} />
               <YAxis axisLine={false} tickLine={false} tick={AXIS_TICK} width={48} domain={["dataMin - 1", "dataMax + 1"]} tickFormatter={(tick: number) => formatNumber(tick)} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(val, name) => [`${formatNumber(Number(val))} kg`, name === "trend" ? "7-day trend" : "Weigh-in"]} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(val, name) => [`${formatNumber(Number(val))} ${unit}`, name === "trend" ? "7-day trend" : "Weigh-in"]} />
               <Line type="monotone" dataKey="weight_kg" stroke={COLORS.muted} strokeWidth={0} dot={{ r: 2.5, fill: COLORS.muted }} isAnimationActive={false} />
               <Line type="monotone" dataKey="trend" stroke={COLORS.lime} strokeWidth={2.5} dot={false} />
             </LineChart>
@@ -244,12 +258,14 @@ function WeightSection({ weights, range, onChanged, onError }: { weights: BodyWe
       {weights.length > 0 && (
         <div className="mt-4 divide-y divide-line">
           {[...weights].reverse().slice(0, 5).map((entry) => (
-            <div key={entry.id} className="flex items-center justify-between py-2 text-xs">
-              <span className="text-muted">{dateLabel(entry.date)}</span>
-              <span className="flex items-center gap-2"><b className="font-medium">{formatNumber(entry.weight_kg)} kg</b>
-                <button onClick={() => { if (window.confirm(`Delete the ${formatNumber(entry.weight_kg)} kg weigh-in from ${dateLabel(entry.date)}?`)) void api.deleteWeight(entry.id).then(onChanged); }} className="rounded-lg p-1.5 text-muted hover:text-red-300" aria-label={`Delete weigh-in from ${dateLabel(entry.date)}`}><Trash2 size={13} /></button>
-              </span>
-            </div>
+            <SwipeToDelete key={entry.id} onDelete={() => onDelete(entry)}>
+              <div className="flex items-center justify-between py-2 text-xs">
+                <span className="text-muted">{dateLabel(entry.date)}</span>
+                <span className="flex items-center gap-2"><b className="font-medium">{formatNumber(fromKg(entry.weight_kg, unit))} {unit}</b>
+                  <button onClick={() => onDelete(entry)} className="hidden rounded-lg p-1.5 text-muted hover:text-red-300 lg:block" aria-label={`Delete weigh-in from ${dateLabel(entry.date)}`}><Trash2 size={13} /></button>
+                </span>
+              </div>
+            </SwipeToDelete>
           ))}
         </div>
       )}
@@ -263,6 +279,7 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
   const [name, setName] = useState("");
   const [metric, setMetric] = useState<"top" | "volume">("top");
   const [points, setPoints] = useState<ExercisePoint[]>([]);
+  const { unit, COLORS, AXIS_TICK, TOOLTIP_STYLE } = useChartTheme();
   const selected = name || exercises[0]?.name || "";
 
   useEffect(() => {
@@ -283,7 +300,7 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
 
   const best = points.reduce<ExercisePoint | null>((top, point) => (!top || point.top_weight_kg > top.top_weight_kg ? point : top), null);
   const last = points[points.length - 1];
-  const chartData = points.map((point) => ({ ...point, label: shortDate(point.date) }));
+  const chartData = points.map((point) => ({ ...point, label: shortDate(point.date), top_weight_kg: fromKg(point.top_weight_kg, unit), volume_kg: fromKg(point.volume_kg, unit) }));
 
   return (
     <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
@@ -303,8 +320,8 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
 
       {best && last && (
         <div className="mt-4 grid grid-cols-2 gap-2">
-          <div className="rounded-2xl bg-night p-3.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Best</p><p className="mt-1.5 text-lg font-semibold">{formatNumber(best.top_weight_kg)} kg <span className="text-xs font-normal text-muted">× {best.reps_at_top}</span></p><p className="text-[10px] text-muted">{dateLabel(best.date)}</p></div>
-          <div className="rounded-2xl bg-night p-3.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Last session</p><p className="mt-1.5 text-lg font-semibold">{formatNumber(last.top_weight_kg)} kg <span className="text-xs font-normal text-muted">× {last.reps_at_top}</span></p><p className="text-[10px] text-muted">{dateLabel(last.date)} · {last.sets} sets · {formatNumber(last.volume_kg)} kg volume</p></div>
+          <div className="rounded-2xl bg-night p-3.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Best</p><p className="mt-1.5 text-lg font-semibold">{formatNumber(fromKg(best.top_weight_kg, unit))} {unit} <span className="text-xs font-normal text-muted">× {best.reps_at_top}</span></p><p className="text-[10px] text-muted">{dateLabel(best.date)}</p></div>
+          <div className="rounded-2xl bg-night p-3.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Last session</p><p className="mt-1.5 text-lg font-semibold">{formatNumber(fromKg(last.top_weight_kg, unit))} {unit} <span className="text-xs font-normal text-muted">× {last.reps_at_top}</span></p><p className="text-[10px] text-muted">{dateLabel(last.date)} · {last.sets} sets · {formatNumber(fromKg(last.volume_kg, unit))} {unit} volume</p></div>
         </div>
       )}
 
@@ -315,7 +332,7 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
               <CartesianGrid vertical={false} stroke={COLORS.grid} strokeDasharray="3 5" />
               <XAxis dataKey="label" axisLine={false} tickLine={false} tick={AXIS_TICK} interval="preserveStartEnd" minTickGap={18} />
               <YAxis axisLine={false} tickLine={false} tick={AXIS_TICK} width={48} domain={metric === "top" ? ["dataMin - 5", "dataMax + 5"] : [0, "auto"]} tickFormatter={(tick: number) => formatNumber(tick)} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(val) => [`${formatNumber(Number(val))} kg`, metric === "top" ? "Heaviest set" : "Volume (sets × reps × kg)"]} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(val) => [`${formatNumber(Number(val))} ${unit}`, metric === "top" ? "Heaviest set" : `Volume (sets × reps × ${unit})`]} />
               <Line type="monotone" dataKey={metric === "top" ? "top_weight_kg" : "volume_kg"} stroke={COLORS.mint} strokeWidth={2.5} dot={{ r: 3, fill: COLORS.mint }} />
             </LineChart>
           </ResponsiveContainer>

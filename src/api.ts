@@ -1,6 +1,6 @@
 // On-device data layer. Everything is stored in this browser's IndexedDB on the phone:
 // no server, works offline. Mirrors the calculations the old FastAPI backend did.
-import type { BackupStatus, BodyWeight, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
+import type { BackupStatus, BodyWeight, DayLog, FoodSource, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 type MealBody = { food_id: number; date: string; meal_type: string; portion_g: number };
@@ -20,6 +20,7 @@ type State = {
   meals: StoredMeal[];
   workouts: Workout[];
   weights: BodyWeight[];
+  days: Record<string, DayLog>; // water and notes, keyed by YYYY-MM-DD
   last_backup_at: number | null;
 };
 
@@ -31,6 +32,7 @@ export type ExportFile = {
   meals: Meal[];
   workouts: Workout[];
   weights?: BodyWeight[]; // absent in backups made before body weight tracking
+  days?: Record<string, DayLog>; // absent in backups made before water/notes
 };
 
 const DB_NAME = "fitness-tracker";
@@ -38,7 +40,7 @@ const STORE = "kv";
 const KEY = "state";
 
 function emptyState(): State {
-  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], last_backup_at: null };
+  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, last_backup_at: null };
 }
 
 // Brings data saved by older versions of the app up to the current shape.
@@ -46,6 +48,8 @@ function migrate(state: State): State {
   state.foods = state.foods.map((food) => ({ ...food, servings: food.servings ?? [] }));
   state.last_backup_at ??= null;
   state.weights ??= [];
+  state.days ??= {};
+  if (state.targets) state.targets.water_ml ??= null;
   state.next_id.weight ??= state.weights.reduce((max, entry) => Math.max(max, entry.id), 0) + 1;
   return state;
 }
@@ -87,13 +91,17 @@ const load = () => (cache ??= readState());
 
 // Mutations run one at a time so two quick taps can't overwrite each other.
 let queue: Promise<unknown> = Promise.resolve();
-function mutate<T>(change: (state: State) => T): Promise<T> {
+// State from just before the most recent delete, for Undo. Any other change clears it, so an
+// undo can never wipe out something added after the delete.
+let undoState: State | null = null;
+function mutate<T>(change: (state: State) => T, { undoable = false } = {}): Promise<T> {
   const run = queue.then(async () => {
     const current = await load();
     const draft: State = structuredClone(current);
     const result = change(draft);
     await writeState(draft);
     cache = Promise.resolve(draft);
+    undoState = undoable ? current : null;
     return result;
   });
   queue = run.catch(() => undefined);
@@ -149,12 +157,12 @@ function cleanTargets(body: Targets): Targets {
     const value = body[key];
     if (value === null || value === undefined) continue;
     if (!isNum(value) || value <= 0) fail("Targets must be positive numbers, or left blank.");
-    out[key] = key === "calories" || key === "workouts_per_week" ? Math.round(value) : value;
+    out[key] = key === "calories" || key === "workouts_per_week" || key === "water_ml" ? Math.round(value) : value;
   }
   return out;
 }
 
-const EMPTY_TARGETS: Targets = { calories: null, protein_g: null, carbohydrates_g: null, fat_g: null, fiber_g: null, workouts_per_week: null };
+const EMPTY_TARGETS: Targets = { calories: null, protein_g: null, carbohydrates_g: null, fat_g: null, fiber_g: null, workouts_per_week: null, water_ml: null };
 
 // ---------- date helpers (YYYY-MM-DD strings, timezone-safe) ----------
 
@@ -236,9 +244,10 @@ export const api = {
       .slice(0, 50);
   },
 
-  createFood: (body: FoodBody) =>
+  createFood: (body: FoodBody & { source?: FoodSource }) =>
     mutate((state) => {
-      const food: Food = { ...cleanFood(body), id: state.next_id.food++, source: "user-entered", is_verified: false };
+      const { source, ...rest } = body;
+      const food: Food = { ...cleanFood(rest), id: state.next_id.food++, source: source === "open-food-facts" ? source : "user-entered", is_verified: false };
       state.foods.push(food);
       return food;
     }),
@@ -256,7 +265,7 @@ export const api = {
       if (!state.foods.some((food) => food.id === id)) fail("Food not found.");
       if (state.meals.some((meal) => meal.food_id === id)) fail("This food has meal history and cannot be deleted.");
       state.foods = state.foods.filter((food) => food.id !== id);
-    }),
+    }, { undoable: true }),
 
   createMeal: (body: MealBody) =>
     mutate((state) => {
@@ -288,7 +297,7 @@ export const api = {
     mutate((state) => {
       if (!state.meals.some((meal) => meal.id === id)) fail("Meal log not found.");
       state.meals = state.meals.filter((meal) => meal.id !== id);
-    }),
+    }, { undoable: true }),
 
   createWorkout: (body: WorkoutBody) =>
     mutate((state) => {
@@ -332,7 +341,7 @@ export const api = {
 
   async backupStatus(): Promise<BackupStatus> {
     const state = await load();
-    return { last_backup_at: state.last_backup_at, has_data: state.foods.length + state.meals.length + state.workouts.length + state.weights.length > 0 };
+    return { last_backup_at: state.last_backup_at, has_data: state.foods.length + state.meals.length + state.workouts.length + state.weights.length + Object.keys(state.days).length > 0 };
   },
 
   markBackedUp: () =>
@@ -344,7 +353,7 @@ export const api = {
     mutate((state) => {
       if (!state.workouts.some((workout) => workout.id === id)) fail("Workout not found.");
       state.workouts = state.workouts.filter((workout) => workout.id !== id);
-    }),
+    }, { undoable: true }),
 
   saveTargets: (body: Targets) =>
     mutate((state) => {
@@ -371,6 +380,35 @@ export const api = {
   deleteWeight: (id: number) =>
     mutate((state) => {
       state.weights = state.weights.filter((entry) => entry.id !== id);
+    }, { undoable: true }),
+
+  /** Restores everything to just before the last delete. */
+  undo: () =>
+    mutate((state) => {
+      if (!undoState) fail("Nothing to undo.");
+      Object.assign(state, structuredClone(undoState));
+    }),
+
+  // ---------- water and notes ----------
+
+  async day(date: string): Promise<DayLog> {
+    const entry = (await load()).days[date];
+    return { water_ml: entry?.water_ml ?? 0, note: entry?.note ?? "" };
+  },
+
+  addWater: (date: string, ml: number) =>
+    mutate((state) => {
+      const entry = state.days[date] ?? { water_ml: 0, note: "" };
+      entry.water_ml = Math.max(0, Math.min(20000, entry.water_ml + Math.round(ml)));
+      state.days[date] = entry;
+      return entry.water_ml;
+    }),
+
+  setNote: (date: string, note: string) =>
+    mutate((state) => {
+      const entry = state.days[date] ?? { water_ml: 0, note: "" };
+      entry.note = note.slice(0, 2000);
+      state.days[date] = entry;
     }),
 
   // ---------- trends ----------
@@ -470,6 +508,7 @@ export const api = {
       meals: [...state.meals].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id).map(publicMeal),
       workouts: [...state.workouts].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id),
       weights: [...state.weights].sort((a, b) => a.date.localeCompare(b.date)),
+      days: state.days,
     };
   },
 
@@ -491,6 +530,13 @@ export const api = {
       state.weights = (Array.isArray(data.weights) ? data.weights : []).filter(
         (entry) => entry && typeof entry.date === "string" && isNum(entry.weight_kg) && isNum(entry.id),
       );
+      state.days = {};
+      if (data.days && typeof data.days === "object") {
+        for (const [date, entry] of Object.entries(data.days)) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !entry) continue;
+          state.days[date] = { water_ml: isNum(entry.water_ml) ? Math.max(0, entry.water_ml) : 0, note: typeof entry.note === "string" ? entry.note.slice(0, 2000) : "" };
+        }
+      }
       state.last_backup_at = Date.now(); // the file just restored from is a backup
       state.next_id = {
         food: maxId(foods.map((food) => food.id)),

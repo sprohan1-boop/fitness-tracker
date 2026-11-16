@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { registerSW } from "virtual:pwa-register";
 import App from "./App";
+import { applyTheme } from "./prefs";
 import "./index.css";
 
 // A Home Screen app on iPhone is usually resumed rather than relaunched, so the browser
@@ -21,6 +22,8 @@ registerSW({
     window.setInterval(check, 30 * 60 * 1000);
   },
 });
+
+applyTheme(); // before first paint, so there is no flash of the wrong theme
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

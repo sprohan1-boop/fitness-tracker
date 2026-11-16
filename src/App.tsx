@@ -13,7 +13,12 @@ import {
   Dumbbell,
   Flame,
   Home,
+  Droplet,
   Leaf,
+  Loader2,
+  ScanBarcode,
+  Minus,
+  NotebookPen,
   Plus,
   Search,
   Settings,
@@ -25,21 +30,19 @@ import {
   Utensils,
   X,
 } from "lucide-react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-} from "recharts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { api } from "./api";
 import { addDays, dateLabel, formatNumber, localDate } from "./utils";
 import { RestTimer, unlockAudio } from "./RestTimer";
-import { ProgressPage } from "./Progress";
-import type { BackupStatus, DashboardData, Food, Meal, Serving, Targets, Workout } from "./types";
+// Chart-heavy views load on demand, keeping the chart library out of the first download.
+const ProgressPage = lazy(() => import("./Progress").then((module) => ({ default: module.ProgressPage })));
+const WeekChart = lazy(() => import("./WeekChart"));
+import { SwipeToDelete } from "./Swipe";
+import { BarcodeScanner, lookupBarcode } from "./Barcode";
+import { fromKg, setPrefs, toKg, usePrefs } from "./prefs";
+import type { ThemePref, Unit } from "./prefs";
+import type { BackupStatus, DashboardData, DayLog, FoodSource, Food, Meal, Serving, Targets, Workout } from "./types";
 
 type Page = "dashboard" | "foods" | "workouts" | "progress" | "settings";
 type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | null;
@@ -54,6 +57,7 @@ const EMPTY_TARGETS: Targets = {
   fat_g: null,
   fiber_g: null,
   workouts_per_week: null,
+  water_ml: null,
 };
 
 /** "Today", "Yesterday", or e.g. "Mon, Nov 10". */
@@ -122,19 +126,25 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState(localDate());
   const [recentFoodIds, setRecentFoodIds] = useState<number[]>([]);
   const [backup, setBackup] = useState<BackupStatus>({ last_backup_at: null, has_data: false });
+  const [dayLog, setDayLog] = useState<DayLog>({ water_ml: 0, note: "" });
   const [editingMeal, setEditingMeal] = useState<Meal | null>(null);
+  const [undoMessage, setUndoMessage] = useState("");
+  const [scanOnOpen, setScanOnOpen] = useState(false);
+  const [dataVersion, setDataVersion] = useState(0); // bumps after every change, so other views reload
   const [editingWorkout, setEditingWorkout] = useState<Workout | null>(null);
   const [workoutTemplate, setWorkoutTemplate] = useState<Workout | null>(null);
 
   const refresh = useCallback(async () => {
-    const [nextDashboard, nextFoods, nextMeals, nextWorkouts, nextRecent, nextBackup] = await Promise.all([
+    const [nextDashboard, nextFoods, nextMeals, nextWorkouts, nextRecent, nextBackup, nextDay] = await Promise.all([
       api.dashboard(selectedDate),
       api.foods(),
       api.meals(selectedDate),
       api.workouts(),
       api.recentFoodIds(),
       api.backupStatus(),
+      api.day(selectedDate),
     ]);
+    setDayLog(nextDay);
     setDashboard(nextDashboard);
     setFoods(nextFoods);
     setMeals(nextMeals);
@@ -168,10 +178,11 @@ export default function App() {
     return () => { mounted = false; };
   }, [refresh]);
 
-  async function runAction(action: () => Promise<unknown>, successMessage?: string) {
+  async function runAction(action: () => Promise<unknown>, successMessage?: string, { undoable = false } = {}) {
     setBusy(true);
     setError("");
     setNotice("");
+    setUndoMessage("");
     try {
       await action();
       await refresh();
@@ -180,7 +191,8 @@ export default function App() {
       setEditingMeal(null);
       setEditingWorkout(null);
       setWorkoutTemplate(null);
-      if (successMessage) setNotice(successMessage);
+      if (successMessage) (undoable ? setUndoMessage : setNotice)(successMessage);
+      setDataVersion((version) => version + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The change could not be saved.");
     } finally {
@@ -188,9 +200,10 @@ export default function App() {
     }
   }
 
-  function openFoodEditor(food: Food | null = null) {
+  function openFoodEditor(food: Food | null = null, { scan = false } = {}) {
     setError("");
     setEditingFood(food);
+    setScanOnOpen(scan);
     setModal("food");
   }
 
@@ -244,7 +257,7 @@ export default function App() {
 
       {/* App shell: header and tab bar stay put; only <main> scrolls (no whole-page bounce on iPhone). */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="z-30 shrink-0 border-b border-line/70 bg-night pt-[env(safe-area-inset-top)]">
+        <header className="app-header z-30 shrink-0 border-b border-line/70 pt-[env(safe-area-inset-top)]">
           <div className="flex h-14 items-center justify-between px-4 sm:h-[72px] sm:px-7 lg:px-10">
             <div>
               <p className="hidden text-[10px] font-semibold uppercase tracking-[.18em] text-muted sm:block">Fitness tracker</p>
@@ -278,24 +291,24 @@ export default function App() {
                 onDateChange={setSelectedDate}
                 backup={backup}
                 onBackup={() => void runBackup()}
+                dayLog={dayLog}
+                onAddWater={(ml) => void api.addWater(selectedDate, ml).then((water_ml) => setDayLog((current) => ({ ...current, water_ml }))).catch(() => setError("Couldn't save water."))}
+                onSaveNote={(note) => api.setNote(selectedDate, note).catch(() => setError("Couldn't save your note."))}
                 onLogMeal={() => openModal("meal")}
                 onLogWorkout={() => openWorkoutEditor()}
                 onEditWorkout={(workout) => openWorkoutEditor({ edit: workout })}
                 onSetTargets={() => openModal("targets")}
                 onNavigate={setPage}
                 onEditMeal={openMealEditor}
-                onDeleteMeal={(meal) => runAction(() => api.deleteMeal(meal.id), "Meal entry removed.")}
+                onDeleteMeal={(meal) => runAction(() => api.deleteMeal(meal.id), `${meal.food_name} removed.`, { undoable: true })}
               />
             ) : page === "foods" ? (
               <FoodLibrary
                 foods={foods}
                 onAdd={() => openFoodEditor()}
+                onScan={() => openFoodEditor(null, { scan: true })}
                 onEdit={openFoodEditor}
-                onDelete={(food) => {
-                  if (window.confirm(`Delete "${food.name}" from your food library?`)) {
-                    void runAction(() => api.deleteFood(food.id), "Food deleted.");
-                  }
-                }}
+                onDelete={(food) => void runAction(() => api.deleteFood(food.id), `"${food.name}" deleted.`, { undoable: true })}
               />
             ) : page === "workouts" ? (
               <WorkoutsPage
@@ -303,14 +316,10 @@ export default function App() {
                 onAdd={() => openWorkoutEditor()}
                 onEdit={(workout) => openWorkoutEditor({ edit: workout })}
                 onRepeat={(workout) => openWorkoutEditor({ template: workout })}
-                onDelete={(workout) => {
-                  if (window.confirm(`Delete "${workout.name}" and its sets?`)) {
-                    void runAction(() => api.deleteWorkout(workout.id), "Workout deleted.");
-                  }
-                }}
+                onDelete={(workout) => void runAction(() => api.deleteWorkout(workout.id), `"${workout.name}" deleted.`, { undoable: true })}
               />
             ) : page === "progress" ? (
-              <ProgressPage onError={setError} />
+              <Suspense fallback={<LoadingState />}><ProgressPage version={dataVersion} onError={setError} onUndoableDelete={(action, message) => runAction(action, message, { undoable: true })} /></Suspense>
             ) : (
               <SettingsPage
                 targets={dashboard?.targets ?? EMPTY_TARGETS}
@@ -327,6 +336,7 @@ export default function App() {
           <div className="pointer-events-none absolute inset-x-0 bottom-3 flex flex-col items-center gap-2 px-4">
             {error && <Toast tone="error" message={error} onDismiss={() => setError("")} />}
             {notice && <Toast tone="ok" message={notice} onDismiss={() => setNotice("")} />}
+            {undoMessage && <Toast tone="ok" message={undoMessage} onDismiss={() => setUndoMessage("")} action={{ label: "Undo", onClick: () => void runAction(() => api.undo(), "Restored.") }} />}
           </div>
         </div>
 
@@ -347,11 +357,13 @@ export default function App() {
           <FoodForm
             key={editingFood?.id ?? "new"}
             initialFood={editingFood}
+            existingFoods={foods}
+            autoScan={scanOnOpen}
             busy={busy}
             error={error}
             onSubmit={(body) => runAction(
               () => editingFood ? api.updateFood(editingFood.id, body) : api.createFood(body),
-              editingFood ? "Food details updated." : "Food added to your library.",
+              editingFood ? "Food details updated." : `${body.name} added to your library.`,
             )}
           />
         </ModalShell>
@@ -378,7 +390,7 @@ export default function App() {
             busy={busy}
             error={error}
             onSubmit={(body) => runAction(() => api.updateMeal(editingMeal.id, body), "Meal updated.")}
-            onDelete={() => runAction(() => api.deleteMeal(editingMeal.id), "Meal entry removed.")}
+            onDelete={() => runAction(() => api.deleteMeal(editingMeal.id), `${editingMeal.food_name} removed.`, { undoable: true })}
           />
         </ModalShell>
       )}
@@ -449,6 +461,9 @@ function DashboardPage({
   onDateChange,
   backup,
   onBackup,
+  dayLog,
+  onAddWater,
+  onSaveNote,
   onLogMeal,
   onLogWorkout,
   onEditWorkout,
@@ -464,6 +479,9 @@ function DashboardPage({
   onDateChange: (date: string) => void;
   backup: BackupStatus;
   onBackup: () => void;
+  dayLog: DayLog;
+  onAddWater: (ml: number) => void;
+  onSaveNote: (note: string) => Promise<unknown>;
   onLogMeal: () => void;
   onLogWorkout: () => void;
   onEditWorkout: (workout: Workout) => void;
@@ -569,6 +587,11 @@ function DashboardPage({
         <p className="mt-4 flex items-start gap-2 text-[10px] leading-4 text-muted"><ShieldCheck size={13} className="mt-0.5 shrink-0 text-mint" /> Nutrition totals are calculated from the values you entered in your food library. They are not independently verified.</p>
       </section>
 
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1.4fr]">
+        <WaterCard water={dayLog.water_ml} target={data.targets.water_ml} onAdd={onAddWater} onSetTarget={onSetTargets} />
+        <NoteCard key={date} date={date} initial={dayLog.note} onSave={onSaveNote} />
+      </div>
+
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
         <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
           <div className="mb-5 flex items-center justify-between">
@@ -576,19 +599,7 @@ function DashboardPage({
             <BarChart3 size={17} className="text-muted" />
           </div>
           <div className="h-[230px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.weekly.days} margin={{ top: 4, right: 4, left: -22, bottom: 0 }}>
-                <CartesianGrid vertical={false} stroke="#2C3530" strokeDasharray="3 5" />
-                <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fill: "#87938C", fontSize: 11 }} dy={9} />
-                <Tooltip
-                  cursor={{ fill: "rgba(255,255,255,.025)" }}
-                  contentStyle={{ background: "#202824", border: "1px solid #35413A", borderRadius: 12, color: "#F5F7F2", fontSize: 12 }}
-                  formatter={(value, name) => [String(name) === "calories" ? `${formatNumber(Number(value))} kcal` : `${value} sessions`, String(name) === "calories" ? "Food" : "Workouts"]}
-                  labelStyle={{ color: "#B7C0BA", marginBottom: 4 }}
-                />
-                <Bar dataKey="calories" fill="#C4F36A" radius={[5, 5, 0, 0]} maxBarSize={23} />
-              </BarChart>
-            </ResponsiveContainer>
+            <Suspense fallback={null}><WeekChart days={data.weekly.days} /></Suspense>
           </div>
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted"><span className="h-2 w-2 rounded-sm bg-lime" />Calories logged per day <span className="ml-auto">{data.weekly.days.reduce((sum, day) => sum + day.workouts, 0)} workout sessions</span></div>
         </section>
@@ -642,7 +653,8 @@ function DashboardPage({
 
 function MealRow({ meal, onEdit, onDelete }: { meal: Meal; onEdit?: () => void; onDelete?: () => void }) {
   return (
-    <div className="flex items-center gap-1 py-2 first:pt-0 last:pb-0">
+    <SwipeToDelete onDelete={onDelete ?? (() => undefined)} className="rounded-xl">
+    <div className="flex items-center gap-1 py-2">
       <button onClick={onEdit} disabled={!onEdit} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl py-1.5 text-left transition hover:bg-panel-raised/40" aria-label={`Edit ${meal.food_name}`}>
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-200/10 text-amber-200"><Leaf size={16} /></div>
         <div className="min-w-0 flex-1">
@@ -651,8 +663,78 @@ function MealRow({ meal, onEdit, onDelete }: { meal: Meal; onEdit?: () => void; 
         </div>
         <div className="text-right"><p className="text-sm font-semibold">{formatNumber(meal.calories)}</p><p className="text-[9px] text-muted">kcal</p></div>
       </button>
-      {onDelete && <button onClick={onDelete} className="rounded-lg p-2 text-muted transition hover:bg-red-400/10 hover:text-red-300" aria-label={`Remove ${meal.food_name}`}><Trash2 size={14} /></button>}
+      {onDelete && <button onClick={onDelete} className="hidden rounded-lg p-2 text-muted transition hover:bg-red-400/10 hover:text-red-300 lg:block" aria-label={`Remove ${meal.food_name}`}><Trash2 size={14} /></button>}
     </div>
+    </SwipeToDelete>
+  );
+}
+
+const GLASS_ML = 250;
+/** 750 -> "0.75", 1500 -> "1.5" (no rounding a glass away). */
+const litres = (ml: number) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(ml / 1000);
+const BOTTLE_ML = 500;
+
+function WaterCard({ water, target, onAdd, onSetTarget }: { water: number; target: number | null; onAdd: (ml: number) => void; onSetTarget: () => void }) {
+  const glasses = water / GLASS_ML;
+  const percent = target ? Math.min(water / target, 1) * 100 : 0;
+  return (
+    <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 text-xs font-medium text-muted"><Droplet size={15} className="text-sky-300" /> WATER</div>
+          <p className="mt-3"><span className="text-3xl font-semibold tracking-tight">{litres(water)}</span> <span className="text-sm text-muted">L</span></p>
+          <p className="mt-1 text-[11px] text-muted">{formatNumber(glasses)} {glasses === 1 ? "glass" : "glasses"}{target ? ` · ${litres(target)} L target` : ""}</p>
+        </div>
+        {!target && <button onClick={onSetTarget} className="rounded-xl border border-line px-3 py-2 text-xs font-medium text-muted">Set target</button>}
+      </div>
+      {target !== null && <div className="mt-4 h-2 overflow-hidden rounded-full bg-night"><div className="h-full rounded-full bg-sky-300 transition-all" style={{ width: `${percent}%` }} /></div>}
+      <div className="mt-4 flex gap-2">
+        <button onClick={() => onAdd(-GLASS_ML)} disabled={water <= 0} className="button-secondary !px-3 disabled:opacity-40" aria-label="Remove a glass"><Minus size={15} /></button>
+        <button onClick={() => onAdd(GLASS_ML)} className="button-secondary flex-1"><Plus size={15} /> Glass · 250 ml</button>
+        <button onClick={() => onAdd(BOTTLE_ML)} className="button-secondary flex-1"><Plus size={15} /> Bottle · 500 ml</button>
+      </div>
+    </section>
+  );
+}
+
+/** Saves a moment after you stop typing, and when you leave the box. */
+function NoteCard({ date, initial, onSave }: { date: string; initial: string; onSave: (note: string) => Promise<unknown> }) {
+  const [text, setText] = useState(initial);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const saved = useRef(initial);
+  // Take in a reloaded note, but never overwrite unsaved typing.
+  useEffect(() => {
+    setText((current) => (current === saved.current ? initial : current));
+    saved.current = initial;
+  }, [initial]);
+  useEffect(() => {
+    if (text === saved.current) return;
+    const id = window.setTimeout(() => void save(), 800);
+    return () => window.clearTimeout(id);
+  });
+  async function save() {
+    if (text === saved.current) return;
+    setStatus("saving");
+    saved.current = text;
+    await onSave(text);
+    setStatus("saved");
+  }
+  return (
+    <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-xs font-medium text-muted"><NotebookPen size={15} className="text-amber-300" /> NOTES · {dayName(date).toUpperCase()}</div>
+        <span className="text-[10px] text-muted">{status === "saving" ? "Saving…" : status === "saved" ? "Saved" : ""}</span>
+      </div>
+      <textarea
+        value={text}
+        onChange={(event) => { setText(event.target.value); setStatus("idle"); }}
+        onBlur={() => void save()}
+        rows={3}
+        maxLength={2000}
+        placeholder="Sleep, energy, how training felt…"
+        className="input-dark mt-3 resize-none py-2.5 leading-5"
+      />
+    </section>
   );
 }
 
@@ -693,12 +775,12 @@ function BackupBanner({ backup, onBackup, onOpenSettings }: { backup: BackupStat
   );
 }
 
-function FoodLibrary({ foods, onAdd, onEdit, onDelete }: { foods: Food[]; onAdd: () => void; onEdit: (food: Food) => void; onDelete: (food: Food) => void }) {
+function FoodLibrary({ foods, onAdd, onScan, onEdit, onDelete }: { foods: Food[]; onAdd: () => void; onScan: () => void; onEdit: (food: Food) => void; onDelete: (food: Food) => void }) {
   const [search, setSearch] = useState("");
   const visibleFoods = useMemo(() => foods.filter((food) => `${food.name} ${food.brand ?? ""}`.toLowerCase().includes(search.toLowerCase())), [foods, search]);
   return (
     <div className="mx-auto max-w-[1050px]">
-      <PageIntro eyebrow="YOUR FOODS" title="Food library" detail="Keep nutrition values you enter, with preparation state and portions clearly separated." action={<button onClick={onAdd} className="button-primary"><Plus size={16} /> Add food</button>} />
+      <PageIntro eyebrow="YOUR FOODS" title="Food library" detail="Your foods with nutrition per 100 g. Scan a packet's barcode or enter values from the label." action={<div className="flex shrink-0 gap-2"><button onClick={onScan} className="button-secondary !px-3"><ScanBarcode size={16} /> Scan</button><button onClick={onAdd} className="button-primary !px-3"><Plus size={16} /> Add</button></div>} />
       <div className="mb-5 flex items-center gap-3 rounded-2xl border border-line bg-panel px-4">
         <Search size={16} className="shrink-0 text-muted" />
         <input value={search} onChange={(event) => setSearch(event.target.value)} className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted" placeholder="Search foods or brands" />
@@ -709,7 +791,8 @@ function FoodLibrary({ foods, onAdd, onEdit, onDelete }: { foods: Food[]; onAdd:
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {visibleFoods.map((food) => (
-            <article key={food.id} className="min-w-0 rounded-2xl border border-line bg-panel p-4 sm:p-5">
+            <SwipeToDelete key={food.id} onDelete={() => onDelete(food)} className="min-w-0 rounded-2xl" contentClassName="">
+            <article className="min-w-0 rounded-2xl border border-line bg-panel p-4 sm:p-5">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-lime/10 text-lime"><Apple size={17} /></div>
@@ -729,9 +812,10 @@ function FoodLibrary({ foods, onAdd, onEdit, onDelete }: { foods: Food[]; onAdd:
                   <span><b className="font-medium text-white">{formatNumber(food.fiber_g_per_100g)}g</b> fiber</span>
                 </div>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>Manually entered · not independently verified</span></div>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>{food.source === "open-food-facts" ? "From Open Food Facts · check against the label" : "Manually entered · not independently verified"}</span></div>
               {food.notes && <p className="mt-2 text-[10px] leading-4 text-muted">{food.notes}</p>}
             </article>
+            </SwipeToDelete>
           ))}
         </div>
       )}
@@ -742,7 +826,7 @@ function FoodLibrary({ foods, onAdd, onEdit, onDelete }: { foods: Food[]; onAdd:
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 
-function FoodForm({ initialFood, busy, error, onSubmit }: { initialFood: Food | null; busy: boolean; error: string; onSubmit: (body: FoodBody) => void }) {
+function FoodForm({ initialFood, existingFoods, autoScan, busy, error, onSubmit }: { initialFood: Food | null; existingFoods: Food[]; autoScan: boolean; busy: boolean; error: string; onSubmit: (body: FoodBody & { source?: FoodSource }) => void }) {
   const [form, setForm] = useState({
     name: initialFood?.name ?? "",
     brand: initialFood?.brand ?? "",
@@ -755,6 +839,52 @@ function FoodForm({ initialFood, busy, error, onSubmit }: { initialFood: Food | 
     notes: initialFood?.notes ?? "",
   });
   const [servings, setServings] = useState((initialFood?.servings ?? []).map((serving) => ({ label: serving.label, grams: String(serving.grams) })));
+  // Barcode scanning (new foods only)
+  const [scanning, setScanning] = useState(autoScan && !initialFood);
+  const [lookingUp, setLookingUp] = useState(false);
+  const [scanInfo, setScanInfo] = useState("");
+  const [source, setSource] = useState<FoodSource>("user-entered");
+
+  const handleBarcode = useCallback(async (barcode: string) => {
+    setScanning(false);
+    setScanInfo("");
+    const existing = existingFoods.find((food) => food.notes?.includes(`Barcode ${barcode}`));
+    if (existing) {
+      setScanInfo(`You already have this product: "${existing.name}".`);
+      return;
+    }
+    setLookingUp(true);
+    try {
+      const found = await lookupBarcode(barcode);
+      if (!found) {
+        setForm((current) => ({ ...current, preparation: "packaged", notes: `Barcode ${barcode}` }));
+        setScanInfo(`Barcode ${barcode} isn't in Open Food Facts yet. Enter the values from the label.`);
+        return;
+      }
+      const text = (value: number | null) => (value === null ? "" : String(value));
+      setForm((current) => ({
+        ...current,
+        name: found.name || current.name,
+        brand: found.brand ?? "",
+        preparation: "packaged",
+        calories_per_100g: text(found.calories),
+        protein_g_per_100g: text(found.protein),
+        carbohydrates_g_per_100g: text(found.carbs),
+        fat_g_per_100g: text(found.fat),
+        fiber_g_per_100g: text(found.fiber),
+        notes: `Barcode ${barcode} · from Open Food Facts`,
+      }));
+      if (found.serving) setServings([{ label: found.serving.label, grams: String(found.serving.grams) }]);
+      setSource("open-food-facts");
+      const missing = [["name", found.name ? 1 : null], ["calories", found.calories], ["protein", found.protein], ["carbs", found.carbs], ["fat", found.fat], ["fiber", found.fiber]]
+        .filter(([, value]) => value === null).map(([label]) => label);
+      setScanInfo(`Filled in from Open Food Facts. Check it against the label before saving.${missing.length ? ` Missing: ${missing.join(", ")}, please add from the label.` : ""}`);
+    } catch (cause) {
+      setScanInfo(cause instanceof Error ? cause.message : "Lookup failed. Check your connection.");
+    } finally {
+      setLookingUp(false);
+    }
+  }, [existingFoods]);
   const [validation, setValidation] = useState("");
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -780,6 +910,7 @@ function FoodForm({ initialFood, busy, error, onSubmit }: { initialFood: Food | 
       fiber_g_per_100g: Number(form.fiber_g_per_100g),
       notes: form.notes.trim() || null,
       servings: filledServings.map((serving) => ({ label: serving.label.trim(), grams: Number(serving.grams) })),
+      ...(initialFood ? {} : { source }),
     });
   }
   const set = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
@@ -787,7 +918,17 @@ function FoodForm({ initialFood, busy, error, onSubmit }: { initialFood: Food | 
     setServings((current) => current.map((serving, i) => (i === index ? { ...serving, [key]: value } : serving)));
   return (
     <form onSubmit={submit} className="space-y-4">
-      <p className="rounded-xl border border-amber-200/10 bg-amber-200/5 p-3 text-[11px] leading-5 text-muted">Use the nutrition values from your own label or source. These values will be marked as user-entered, not verified.</p>
+      {scanning && <BarcodeScanner onDetected={handleBarcode} onClose={() => setScanning(false)} />}
+      {!initialFood && (
+        <button type="button" onClick={() => setScanning(true)} disabled={lookingUp} className="button-secondary w-full">
+          {lookingUp ? <><Loader2 size={15} className="animate-spin" /> Looking up product…</> : <><ScanBarcode size={16} /> Scan barcode</>}
+        </button>
+      )}
+      {scanInfo ? (
+        <p className="rounded-xl border border-mint/20 bg-mint/5 p-3 text-[11px] leading-5 text-zinc-300">{scanInfo}</p>
+      ) : (
+        <p className="rounded-xl border border-amber-200/10 bg-amber-200/5 p-3 text-[11px] leading-5 text-muted">Use the nutrition values from your own label or source. These values will be marked as user-entered, not verified.</p>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Food name" required><input required maxLength={120} value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Rolled oats" className="input-dark" /></Field>
         <Field label="Brand (optional)"><input maxLength={120} value={form.brand} onChange={(e) => set("brand", e.target.value)} placeholder="Brand or source note" className="input-dark" /></Field>
@@ -1011,14 +1152,19 @@ function MealEditForm({ meal, servings, busy, error, onSubmit, onDelete }: { mea
   );
 }
 
-type SetDraft = { exercise_name: string; reps: string; weight_kg: string };
+/** `weight` is in the display unit; `kg`/`shown` remember the stored value so unchanged sets keep it exactly. */
+type SetDraft = { exercise_name: string; reps: string; weight: string; kg?: number; shown?: string };
 
-const toDrafts = (workout: Workout): SetDraft[] =>
-  workout.sets.map((set) => ({ exercise_name: set.exercise_name, reps: String(set.reps), weight_kg: String(set.weight_kg) }));
+const toDrafts = (workout: Workout, unit: Unit): SetDraft[] =>
+  workout.sets.map((set) => {
+    const shown = String(fromKg(set.weight_kg, unit));
+    return { exercise_name: set.exercise_name, reps: String(set.reps), weight: shown, kg: set.weight_kg, shown };
+  });
 
 function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: { initial: Workout | null; isEdit: boolean; history: Workout[]; busy: boolean; error: string; date: string; onSubmit: (body: WorkoutBody) => void }) {
   const [name, setName] = useState(initial?.name ?? "");
-  const [sets, setSets] = useState<SetDraft[]>(initial ? toDrafts(initial) : [{ exercise_name: "", reps: "", weight_kg: "" }]);
+  const { unit } = usePrefs();
+  const [sets, setSets] = useState<SetDraft[]>(initial ? toDrafts(initial, unit) : [{ exercise_name: "", reps: "", weight: "" }]);
   const [validation, setValidation] = useState("");
   const [restKick, setRestKick] = useState(0);
 
@@ -1053,20 +1199,21 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!name.trim()) { setValidation("Add a workout name."); return; }
-    if (sets.some((set) => !set.exercise_name.trim() || !Number.isInteger(Number(set.reps)) || Number(set.reps) < 1 || set.weight_kg.trim() === "" || !Number.isFinite(Number(set.weight_kg)) || Number(set.weight_kg) < 0)) {
-      setValidation("Each set needs an exercise, reps, and a non-negative weight. Use 0 kg for bodyweight sets.");
+    if (sets.some((set) => !set.exercise_name.trim() || !Number.isInteger(Number(set.reps)) || Number(set.reps) < 1 || set.weight.trim() === "" || !Number.isFinite(Number(set.weight)) || Number(set.weight) < 0)) {
+      setValidation(`Each set needs an exercise, reps, and a non-negative weight. Use 0 ${unit} for bodyweight sets.`);
       return;
     }
     const counts: Record<string, number> = {};
     const normalized = sets.map((set) => {
       const exercise_name = set.exercise_name.trim();
       counts[exercise_name] = (counts[exercise_name] ?? 0) + 1;
-      return { exercise_name, set_number: counts[exercise_name], reps: Number(set.reps), weight_kg: Number(set.weight_kg) };
+      const weight_kg = set.kg !== undefined && set.weight === set.shown ? set.kg : toKg(Number(set.weight), unit);
+      return { exercise_name, set_number: counts[exercise_name], reps: Number(set.reps), weight_kg };
     });
     setValidation("");
     onSubmit({ name: name.trim(), date, sets: normalized });
   }
-  function updateSet(index: number, key: keyof SetDraft, value: string) {
+  function updateSet(index: number, key: "exercise_name" | "reps" | "weight", value: string) {
     setSets((current) => current.map((set, i) => (i === index ? { ...set, [key]: value } : set)));
   }
   function addSet() {
@@ -1075,7 +1222,7 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
     // Copy the previous set so the next one is usually just one tap away.
     setSets((current) => {
       const last = current[current.length - 1];
-      return [...current, last ? { ...last } : { exercise_name: "", reps: "", weight_kg: "" }];
+      return [...current, last ? { ...last } : { exercise_name: "", reps: "", weight: "" }];
     });
   }
 
@@ -1086,7 +1233,7 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
           <p className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted"><Repeat size={12} /> Repeat a previous workout</p>
           <div className="flex flex-wrap gap-1.5">
             {recentWorkouts.map((workout) => (
-              <button key={workout.id} type="button" onClick={() => { setName(workout.name); setSets(toDrafts(workout)); }} className="rounded-full border border-mint/30 px-3 py-1.5 text-[11px] font-medium text-mint transition hover:bg-mint/10">
+              <button key={workout.id} type="button" onClick={() => { setName(workout.name); setSets(toDrafts(workout, unit)); }} className="rounded-full border border-mint/30 px-3 py-1.5 text-[11px] font-medium text-mint transition hover:bg-mint/10">
                 {workout.name} <span className="text-muted">· {dateLabel(workout.date)}</span>
               </button>
             ))}
@@ -1095,7 +1242,7 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
       )}
       <Field label="Workout name"><input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Upper body" className="input-dark" /></Field>
       <div>
-        <div className="mb-2 flex items-center justify-between"><p className="text-xs font-medium text-zinc-300">Sets</p><span className="text-[10px] text-muted">Weight in kg</span></div>
+        <div className="mb-2 flex items-center justify-between"><p className="text-xs font-medium text-zinc-300">Sets</p><span className="text-[10px] text-muted">Weight in {unit}</span></div>
         <datalist id="exercise-names">{exerciseNames.map((exercise) => <option key={exercise} value={exercise} />)}</datalist>
         <div className="space-y-2">
           {sets.map((set, index) => {
@@ -1106,13 +1253,13 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
               <div key={index}>
                 {previous && (
                   <p className="mb-1 rounded-lg bg-mint/5 px-2.5 py-1.5 text-[10px] text-mint">
-                    Last time ({dateLabel(previous.date)}): {previous.sets.map((item) => `${item.reps} × ${formatNumber(item.weight_kg)} kg`).join(" · ")}
+                    Last time ({dateLabel(previous.date)}): {previous.sets.map((item) => `${item.reps} × ${formatNumber(fromKg(item.weight_kg, unit))} ${unit}`).join(" · ")}
                   </p>
                 )}
                 <div className="grid grid-cols-[minmax(0,1fr)_60px_72px_30px] items-end gap-2">
                   <Field label={index === 0 ? "Exercise" : " "}><input value={set.exercise_name} list="exercise-names" onChange={(e) => updateSet(index, "exercise_name", e.target.value)} placeholder="Exercise name" className="input-dark !px-2.5" /></Field>
                   <Field label={index === 0 ? "Reps" : " "}><input type="number" inputMode="numeric" min="1" value={set.reps} onChange={(e) => updateSet(index, "reps", e.target.value)} placeholder="0" className="input-dark !px-2 text-center" /></Field>
-                  <Field label={index === 0 ? "Weight" : " "}><input type="number" inputMode="decimal" min="0" step="any" value={set.weight_kg} onChange={(e) => updateSet(index, "weight_kg", e.target.value)} placeholder="0" className="input-dark !px-2 text-center" /></Field>
+                  <Field label={index === 0 ? "Weight" : " "}><input type="number" inputMode="decimal" min="0" step="any" value={set.weight} onChange={(e) => updateSet(index, "weight", e.target.value)} placeholder="0" className="input-dark !px-2 text-center" /></Field>
                   <button type="button" onClick={() => setSets((current) => (current.length > 1 ? current.filter((_, i) => i !== index) : current))} aria-label="Remove set" className="mb-1 rounded-lg p-2 text-muted hover:text-red-300"><X size={14} /></button>
                 </div>
               </div>
@@ -1136,6 +1283,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
     fat_g: targets.fat_g == null ? "" : String(targets.fat_g),
     fiber_g: targets.fiber_g == null ? "" : String(targets.fiber_g),
     workouts_per_week: targets.workouts_per_week == null ? "" : String(targets.workouts_per_week),
+    water_ml: targets.water_ml == null ? "" : String(targets.water_ml),
   });
   const [validation, setValidation] = useState("");
   function submit(event: FormEvent) {
@@ -1151,6 +1299,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
       fat_g: form.fat_g.trim() ? Number(form.fat_g) : null,
       fiber_g: form.fiber_g.trim() ? Number(form.fiber_g) : null,
       workouts_per_week: form.workouts_per_week.trim() ? Number(form.workouts_per_week) : null,
+      water_ml: form.water_ml.trim() ? Number(form.water_ml) : null,
     });
   }
   const update = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
@@ -1164,6 +1313,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
         <NumberField label="Fat · g" value={form.fat_g} onChange={(v) => update("fat_g", v)} />
         <NumberField label="Fiber · g" value={form.fiber_g} onChange={(v) => update("fiber_g", v)} />
         <NumberField label="Workouts · / week" value={form.workouts_per_week} onChange={(v) => update("workouts_per_week", v)} />
+        <NumberField label="Water · ml / day" value={form.water_ml} onChange={(v) => update("water_ml", v)} />
       </div>
       {(validation || error) && <FormError message={validation || error} />}
       <button disabled={busy} className="button-primary w-full disabled:opacity-60">{busy ? "Saving…" : "Save targets"}</button>
@@ -1172,6 +1322,7 @@ function TargetsForm({ targets, busy, error, onSubmit }: { targets: Targets; bus
 }
 
 function WorkoutsPage({ workouts, onAdd, onEdit, onRepeat, onDelete }: { workouts: Workout[]; onAdd: () => void; onEdit: (workout: Workout) => void; onRepeat: (workout: Workout) => void; onDelete: (workout: Workout) => void }) {
+  const { unit } = usePrefs();
   const personalRecords = useMemo(() => {
     const records = new Map<string, number>();
     workouts.forEach((workout) => workout.sets.forEach((set) => records.set(set.exercise_name, Math.max(records.get(set.exercise_name) ?? 0, set.weight_kg))));
@@ -1179,11 +1330,11 @@ function WorkoutsPage({ workouts, onAdd, onEdit, onRepeat, onDelete }: { workout
   }, [workouts]);
   return (
     <div className="mx-auto max-w-[1050px]">
-      <PageIntro eyebrow="TRAINING JOURNAL" title="Workouts" detail="Record completed sets in kilograms. Repeat a past session to start from last time's numbers." action={<button onClick={onAdd} className="button-primary"><Plus size={16} /> Log workout</button>} />
+      <PageIntro eyebrow="TRAINING JOURNAL" title="Workouts" detail="Record completed sets. Repeat a past session to start from last time's numbers." action={<button onClick={onAdd} className="button-primary"><Plus size={16} /> Log workout</button>} />
       {personalRecords.length > 0 && (
         <section className="mb-5 rounded-3xl border border-line bg-panel p-5">
           <div className="mb-4 flex items-center gap-2"><Target size={15} className="text-lime" /><h3 className="text-sm font-semibold">Top recorded weights</h3><span className="text-[10px] text-muted">from your logged sets</span></div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{personalRecords.map(([exercise, weight]) => <div key={exercise} className="rounded-xl bg-night p-3"><p className="truncate text-xs font-medium">{exercise}</p><p className="mt-2 text-lg font-semibold">{formatNumber(weight)} <span className="text-[10px] font-normal text-muted">kg</span></p></div>)}</div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{personalRecords.map(([exercise, weight]) => <div key={exercise} className="rounded-xl bg-night p-3"><p className="truncate text-xs font-medium">{exercise}</p><p className="mt-2 text-lg font-semibold">{formatNumber(fromKg(weight, unit))} <span className="text-[10px] font-normal text-muted">{unit}</span></p></div>)}</div>
         </section>
       )}
       {workouts.length === 0 ? <EmptyState icon={Dumbbell} title="Your training log is ready" detail="Add a workout with exercises, reps, and weights to start building your history." action="Log a workout" onClick={onAdd} /> : (
@@ -1196,12 +1347,14 @@ function WorkoutsPage({ workouts, onAdd, onEdit, onRepeat, onDelete }: { workout
 }
 
 function WorkoutCard({ workout, onEdit, onRepeat, onDelete }: { workout: Workout; onEdit: () => void; onRepeat: () => void; onDelete: () => void }) {
+  const { unit } = usePrefs();
   const grouped = useMemo(() => {
     const map = new Map<string, typeof workout.sets>();
     workout.sets.forEach((set) => map.set(set.exercise_name, [...(map.get(set.exercise_name) ?? []), set]));
     return [...map.entries()];
   }, [workout.sets]);
   return (
+    <SwipeToDelete onDelete={onDelete} className="rounded-2xl" contentClassName="">
     <article className="rounded-2xl border border-line bg-panel p-4 sm:p-5">
       <div className="flex items-start justify-between gap-2">
         <button onClick={onEdit} className="flex min-w-0 items-center gap-3 text-left">
@@ -1218,18 +1371,20 @@ function WorkoutCard({ workout, onEdit, onRepeat, onDelete }: { workout: Workout
         {grouped.map(([exercise, sets]) => (
           <div key={exercise} className="rounded-xl bg-night px-3 py-2.5">
             <p className="text-xs font-medium">{exercise}</p>
-            <p className="mt-1 text-[10px] text-muted">{sets.map((set) => `${set.reps} × ${formatNumber(set.weight_kg)} kg`).join("  ·  ")}</p>
+            <p className="mt-1 text-[10px] text-muted">{sets.map((set) => `${set.reps} × ${formatNumber(fromKg(set.weight_kg, unit))} ${unit}`).join("  ·  ")}</p>
           </div>
         ))}
       </div>
       {workout.notes && <p className="mt-3 text-xs text-muted">{workout.notes}</p>}
     </article>
+    </SwipeToDelete>
   );
 }
 
 function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { targets: Targets; onEditTargets: () => void; backup: BackupStatus; onBackup: () => void; onImport: (backup: unknown) => void }) {
   const age = backup.last_backup_at === null ? null : daysSince(backup.last_backup_at);
   const lastBackup = age === null ? "Never" : age === 0 ? "Today" : age === 1 ? "Yesterday" : `${age} days ago`;
+  const prefs = usePrefs();
   function importData(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -1246,6 +1401,7 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
     ["Fat", targets.fat_g == null ? "Not set" : `${formatNumber(targets.fat_g)} g`],
     ["Fiber", targets.fiber_g == null ? "Not set" : `${formatNumber(targets.fiber_g)} g`],
     ["Workouts", targets.workouts_per_week == null ? "Not set" : `${targets.workouts_per_week} / week`],
+    ["Water", targets.water_ml == null ? "Not set" : `${formatNumber(targets.water_ml)} ml / day`],
   ];
   return (
     <div className="mx-auto max-w-[850px]">
@@ -1258,8 +1414,10 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
         <div className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2">{targetRows.map(([label, value]) => <div key={label} className="flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">{label}</span><span className="text-xs font-medium">{value}</span></div>)}</div>
       </section>
       <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
-        <div className="flex items-center gap-2"><Settings size={16} className="text-mint" /><h3 className="font-semibold">Units</h3></div>
-        <div className="mt-4 flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">Weight and food portions</span><span className="rounded-full bg-mint/10 px-2.5 py-1 text-[10px] font-semibold text-mint">Metric · kg / g</span></div>
+        <div className="flex items-center gap-2"><Settings size={16} className="text-mint" /><h3 className="font-semibold">Display</h3></div>
+        <SettingToggle label="Body weight and lifts" value={prefs.unit} options={[["kg", "kg"], ["lb", "lb"]]} onChange={(unit) => setPrefs({ unit })} />
+        <div className="mt-2 flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">Food portions</span><span className="text-[11px] text-zinc-300">grams</span></div>
+        <SettingToggle label="Appearance" value={prefs.theme} options={[["system", "Auto"], ["dark", "Dark"], ["light", "Light"]]} onChange={(theme: ThemePref) => setPrefs({ theme })} />
         <div className="mt-2 flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">App version</span><span className="text-[11px] tabular-nums text-zinc-300">{__APP_VERSION__}</span></div>
       </section>
       <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
@@ -1274,6 +1432,19 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
           <label className="button-secondary cursor-pointer"><ArrowUpRight size={15} /> Restore backup<input type="file" accept="application/json,.json" onChange={importData} className="hidden" /></label>
         </div>
       </section>
+    </div>
+  );
+}
+
+function SettingToggle<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: [T, string][]; onChange: (value: T) => void }) {
+  return (
+    <div className="mt-2 flex items-center justify-between gap-3 rounded-xl bg-night px-3.5 py-2">
+      <span className="text-xs text-muted">{label}</span>
+      <div className="flex rounded-lg border border-line bg-panel p-0.5">
+        {options.map(([option, text]) => (
+          <button key={option} onClick={() => onChange(option)} className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition ${value === option ? "bg-mint text-night" : "text-muted"}`}>{text}</button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1333,10 +1504,10 @@ function Alert({ message, onDismiss }: { message: string; onDismiss?: () => void
   return <div role="alert" className="mb-5 flex items-start justify-between gap-3 rounded-2xl border border-red-300/20 bg-red-400/5 px-4 py-3 text-xs leading-5 text-red-200"><span>{message}</span>{onDismiss && <button onClick={onDismiss} className="shrink-0 text-red-200/70 hover:text-red-100" aria-label="Dismiss"><X size={14} /></button>}</div>;
 }
 
-function Toast({ tone, message, onDismiss }: { tone: "ok" | "error"; message: string; onDismiss: () => void }) {
-  // Auto-hide: confirmations quickly, errors after giving time to read.
+function Toast({ tone, message, onDismiss, action }: { tone: "ok" | "error"; message: string; onDismiss: () => void; action?: { label: string; onClick: () => void } }) {
+  // Auto-hide: confirmations quickly, Undo and errors after giving time to react.
   useEffect(() => {
-    const id = window.setTimeout(onDismiss, tone === "ok" ? 2200 : 6000);
+    const id = window.setTimeout(onDismiss, action || tone === "error" ? 6000 : 2200);
     return () => window.clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- restart only for a new message
   }, [message, tone]);
@@ -1345,6 +1516,7 @@ function Toast({ tone, message, onDismiss }: { tone: "ok" | "error"; message: st
     <div role={tone === "ok" ? "status" : "alert"} className={`toast-in pointer-events-auto flex max-w-md items-center gap-2.5 rounded-2xl border bg-panel-raised px-4 py-2.5 text-xs shadow-2xl ${styles}`}>
       {tone === "ok" ? <Check size={14} className="shrink-0" /> : <X size={14} className="shrink-0" />}
       <span className="leading-5">{message}</span>
+      {action && <button onClick={() => { onDismiss(); action.onClick(); }} className="ml-1 shrink-0 rounded-lg bg-mint/15 px-2.5 py-1 font-semibold">{action.label}</button>}
       <button onClick={onDismiss} className="ml-1 shrink-0 opacity-60" aria-label="Dismiss"><X size={13} /></button>
     </div>
   );
