@@ -5,8 +5,9 @@ import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, Responsiv
 import { api } from "./api";
 import { SwipeToDelete } from "./Swipe";
 import { MeasurementsSection } from "./Measurements";
+import { MuscleSection } from "./Training";
 import { chartColors, fromKg, resolvedTheme, toKg, usePrefs } from "./prefs";
-import type { BodyWeight, EnergyEstimate, ExercisePoint, ExerciseSummary, Measurement, MeasureKey, Trends } from "./types";
+import type { BodyWeight, EnergyEstimate, Muscle, MuscleVolume, ExercisePoint, ExerciseSummary, Measurement, MeasureKey, Trends } from "./types";
 import { addDays, dateLabel, formatHours, formatNumber, localDate, shortDate } from "./utils";
 
 /** Chart colours and styles for the current theme. */
@@ -32,6 +33,7 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
   const [exercises, setExercises] = useState<ExerciseSummary[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [energy, setEnergy] = useState<EnergyEstimate | null>(null);
+  const [volume, setVolume] = useState<MuscleVolume | null>(null);
   const [savingMeasure, setSavingMeasure] = useState(false);
   const chartTheme = useChartTheme();
 
@@ -39,6 +41,7 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
     try {
       const [nextTrends, nextWeights, nextExercises, nextMeasurements, nextEnergy] = await Promise.all([api.trends(localDate(), range), api.weights(), api.exercises(), api.measurements(), api.energyEstimate(localDate())]);
       setEnergy(nextEnergy);
+      setVolume(await api.muscleVolume(localDate(), 7));
       setTrends(nextTrends);
       setWeights(nextWeights);
       setExercises(nextExercises);
@@ -92,6 +95,12 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
         onDelete={(entry) => void onUndoableDelete(() => api.deleteMeasurement(entry.id), `Measurements from ${dateLabel(entry.date)} deleted.`)}
       />
       <ExerciseSection exercises={exercises} />
+      {volume && (
+        <MuscleSection
+          volume={volume}
+          onAssign={(exercise: string, muscle: Muscle) => void api.setExerciseMuscle(exercise, muscle).then(load).catch(() => onError("Couldn't save that."))}
+        />
+      )}
     </div>
   );
 }
@@ -405,7 +414,7 @@ function WeightSection({ weights, range, onChanged, onError, onDelete }: { weigh
 
 function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
   const [name, setName] = useState("");
-  const [metric, setMetric] = useState<"top" | "volume">("top");
+  const [metric, setMetric] = useState<"top" | "e1rm" | "volume">("top");
   const [points, setPoints] = useState<ExercisePoint[]>([]);
   const { unit, COLORS, AXIS_TICK, TOOLTIP_STYLE } = useChartTheme();
   const selected = name || exercises[0]?.name || "";
@@ -428,16 +437,18 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
 
   const best = points.reduce<ExercisePoint | null>((top, point) => (!top || point.top_weight_kg > top.top_weight_kg ? point : top), null);
   const last = points[points.length - 1];
-  const chartData = points.map((point) => ({ ...point, label: shortDate(point.date), top_weight_kg: fromKg(point.top_weight_kg, unit), volume_kg: fromKg(point.volume_kg, unit) }));
+  const chartData = points.map((point) => ({ ...point, label: shortDate(point.date), top_weight_kg: fromKg(point.top_weight_kg, unit), volume_kg: fromKg(point.volume_kg, unit), e1rm_kg: point.e1rm_kg === null ? null : fromKg(point.e1rm_kg, unit) }));
+  const bestE1rm = points.reduce<number | null>((top, point) => (point.e1rm_kg !== null && (top === null || point.e1rm_kg > top) ? point.e1rm_kg : top), null);
+  const METRIC = { top: { key: "top_weight_kg", label: "Heaviest set" }, e1rm: { key: "e1rm_kg", label: "Est. 1RM" }, volume: { key: "volume_kg", label: `Volume (sets × reps × ${unit})` } } as const;
 
   return (
     <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2"><Trophy size={16} className="text-mint" /><h3 className="font-semibold">Lift progress</h3></div>
         <div className="flex rounded-xl border border-line bg-night p-1">
-          {(["top", "volume"] as const).map((value) => (
+          {(["top", "e1rm", "volume"] as const).map((value) => (
             <button key={value} onClick={() => setMetric(value)} className={`rounded-lg px-3 py-1.5 text-[11px] font-medium ${metric === value ? "bg-mint text-night" : "text-muted"}`}>
-              {value === "top" ? "Heaviest set" : "Volume"}
+              {value === "top" ? "Heaviest" : value === "e1rm" ? "1RM" : "Volume"}
             </button>
           ))}
         </div>
@@ -448,7 +459,7 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
 
       {best && last && (
         <div className="mt-4 grid grid-cols-2 gap-2">
-          <div className="rounded-2xl bg-night p-3.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Best</p><p className="mt-1.5 text-lg font-semibold">{formatNumber(fromKg(best.top_weight_kg, unit))} {unit} <span className="text-xs font-normal text-muted">× {best.reps_at_top}</span></p><p className="text-[10px] text-muted">{dateLabel(best.date)}</p></div>
+          <div className="rounded-2xl bg-night p-3.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Best</p><p className="mt-1.5 text-lg font-semibold">{formatNumber(fromKg(best.top_weight_kg, unit))} {unit} <span className="text-xs font-normal text-muted">× {best.reps_at_top}</span></p><p className="text-[10px] text-muted">{dateLabel(best.date)}{bestE1rm !== null ? ` · est. 1RM ${formatNumber(fromKg(bestE1rm, unit))} ${unit}` : ""}</p></div>
           <div className="rounded-2xl bg-night p-3.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Last session</p><p className="mt-1.5 text-lg font-semibold">{formatNumber(fromKg(last.top_weight_kg, unit))} {unit} <span className="text-xs font-normal text-muted">× {last.reps_at_top}</span></p><p className="text-[10px] text-muted">{dateLabel(last.date)} · {last.sets} sets · {formatNumber(fromKg(last.volume_kg, unit))} {unit} volume</p></div>
         </div>
       )}
@@ -459,9 +470,9 @@ function ExerciseSection({ exercises }: { exercises: ExerciseSummary[] }) {
             <LineChart data={chartData} margin={{ top: 6, right: 6, left: -18, bottom: 0 }}>
               <CartesianGrid vertical={false} stroke={COLORS.grid} strokeDasharray="3 5" />
               <XAxis dataKey="label" axisLine={false} tickLine={false} tick={AXIS_TICK} interval="preserveStartEnd" minTickGap={18} />
-              <YAxis axisLine={false} tickLine={false} tick={AXIS_TICK} width={48} domain={metric === "top" ? ["dataMin - 5", "dataMax + 5"] : [0, "auto"]} tickFormatter={(tick: number) => formatNumber(tick)} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(val) => [`${formatNumber(Number(val))} ${unit}`, metric === "top" ? "Heaviest set" : `Volume (sets × reps × ${unit})`]} />
-              <Line type="monotone" dataKey={metric === "top" ? "top_weight_kg" : "volume_kg"} stroke={COLORS.mint} strokeWidth={2.5} dot={{ r: 3, fill: COLORS.mint }} />
+              <YAxis axisLine={false} tickLine={false} tick={AXIS_TICK} width={48} domain={metric === "volume" ? [0, "auto"] : ["dataMin - 5", "dataMax + 5"]} tickFormatter={(tick: number) => formatNumber(tick)} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(val) => [`${formatNumber(Number(val))} ${unit}`, METRIC[metric].label]} />
+              <Line type="monotone" dataKey={METRIC[metric].key} connectNulls stroke={COLORS.mint} strokeWidth={2.5} dot={{ r: 3, fill: COLORS.mint }} />
             </LineChart>
           </ResponsiveContainer>
         </div>

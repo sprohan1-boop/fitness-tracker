@@ -67,7 +67,14 @@ export type Trends = {
 
 export type ExerciseSummary = { name: string; sessions: number; last_date: string };
 
-export type ExercisePoint = { date: string; top_weight_kg: number; reps_at_top: number; volume_kg: number; sets: number };
+export type ExercisePoint = { date: string; top_weight_kg: number; reps_at_top: number; volume_kg: number; sets: number; e1rm_kg: number | null };
+
+export type Muscle = "chest" | "back" | "shoulders" | "biceps" | "triceps" | "legs" | "glutes" | "calves" | "core";
+
+/** A planned workout: which weekdays (0 = Monday … 6 = Sunday) and target sets × reps per exercise. */
+export type Routine = { id: number; name: string; days: number[]; exercises: { name: string; sets: number; reps: number }[] };
+
+export type MuscleVolume = { muscles: { muscle: Muscle; sets: number }[]; unassigned: { exercise: string; sets: number }[] };
 
 export type Food = {
   id: number;

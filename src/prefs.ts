@@ -36,6 +36,8 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
+export const currentPrefs = (): Prefs => current;
+
 export function usePrefs(): Prefs {
   return useSyncExternalStore(subscribe, () => current);
 }

@@ -6,6 +6,7 @@ import {
   CalendarDays,
   ChefHat,
   Check,
+  ClipboardList,
   Copy,
   ChevronLeft,
   ChevronRight,
@@ -44,14 +45,18 @@ const WeekChart = lazy(() => import("./WeekChart"));
 import { SwipeToDelete } from "./Swipe";
 import { Field, FormError, ModalShell, NumberField } from "./ui";
 import { FastingCard, RecipeForm, TargetCalculator } from "./Nutrition";
+import { RoutineCard, RoutineForm, TodayPlans, weekdayIndex } from "./Training";
+import { suggestIncrease } from "./training-logic";
 import { CardioCard, CardioForm, HabitsCard, HabitsManager, SleepCard, SleepForm, StepsCard, cardioLabel } from "./Health";
 import { BarcodeScanner, lookupBarcode } from "./Barcode";
 import { fromKg, setPrefs, toKg, usePrefs } from "./prefs";
+import { currentPrefs } from "./prefs";
+const prefsUnit = () => currentPrefs().unit;
 import type { ThemePref, Unit } from "./prefs";
-import type { BackupStatus, Cardio, DashboardData, DayLog, EnergyEstimate, Fast, FoodSource, HabitStatus, Profile, Food, Meal, Serving, Targets, Workout } from "./types";
+import type { BackupStatus, Cardio, DashboardData, Routine, DayLog, EnergyEstimate, Fast, FoodSource, HabitStatus, Profile, Food, Meal, Serving, Targets, Workout } from "./types";
 
 type Page = "dashboard" | "foods" | "workouts" | "progress" | "settings";
-type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | "recipe" | null;
+type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | "recipe" | "routine" | null;
 type WorkoutBody = { name: string; date: string; sets: { exercise_name: string; set_number: number; reps: number; weight_kg: number }[] };
 
 const BACKUP_REMIND_DAYS = 7;
@@ -137,6 +142,10 @@ export default function App() {
   const [habits, setHabits] = useState<HabitStatus[]>([]);
   const [cardio, setCardio] = useState<Cardio[]>([]);
   const [editingCardio, setEditingCardio] = useState<Cardio | null>(null);
+  const [routines, setRoutines] = useState<Routine[]>([]);
+  const [editingRoutine, setEditingRoutine] = useState<Routine | null>(null);
+  /** Target reps per exercise (lowercased) when a workout was started from a plan. */
+  const [planTargets, setPlanTargets] = useState<Record<string, number>>({});
   const [fasting, setFasting] = useState<{ active: Fast | null; recent: Fast[] }>({ active: null, recent: [] });
   const [targetContext, setTargetContext] = useState<{ profile: Profile | null; weightKg: number | null; energy: EnergyEstimate | null }>({ profile: null, weightKg: null, energy: null });
   const [editingMeal, setEditingMeal] = useState<Meal | null>(null);
@@ -156,7 +165,8 @@ export default function App() {
       api.backupStatus(),
       api.day(selectedDate),
     ]);
-    const [nextHabits, nextCardio, nextFasting] = await Promise.all([api.habits(selectedDate), api.cardio(), api.fasting()]);
+    const [nextHabits, nextCardio, nextFasting, nextRoutines] = await Promise.all([api.habits(selectedDate), api.cardio(), api.fasting(), api.routines()]);
+    setRoutines(nextRoutines);
     setFasting(nextFasting);
     setDayLog(nextDay);
     setHabits(nextHabits);
@@ -209,6 +219,8 @@ export default function App() {
         setEditingWorkout(null);
         setWorkoutTemplate(null);
         setEditingCardio(null);
+        setEditingRoutine(null);
+        setPlanTargets({});
       }
       if (successMessage) (undoable ? setUndoMessage : setNotice)(successMessage);
       setDataVersion((version) => version + 1);
@@ -249,6 +261,30 @@ export default function App() {
     openModal("recipe");
   }
 
+  function openRoutineEditor(routine: Routine | null = null) {
+    setEditingRoutine(routine);
+    openModal("routine");
+  }
+
+  /** Opens the workout form filled from a plan: target reps, and last time's weight (or the suggested increase). */
+  function startRoutine(routine: Routine) {
+    const stepKg = prefsUnit() === "lb" ? 5 / 2.2046226218 : 2.5;
+    const targets: Record<string, number> = {};
+    let setId = 0;
+    const sets = routine.exercises.flatMap((exercise) => {
+      targets[exercise.name.toLowerCase()] = exercise.reps;
+      const key = exercise.name.toLowerCase();
+      const last = workouts.find((workout) => workout.sets.some((set) => set.exercise_name.toLowerCase() === key));
+      const lastWeight = last ? Math.max(...last.sets.filter((set) => set.exercise_name.toLowerCase() === key).map((set) => set.weight_kg)) : 0;
+      const increase = suggestIncrease(exercise.name, workouts, exercise.reps, stepKg);
+      const weight = increase?.toKg ?? lastWeight;
+      return Array.from({ length: exercise.sets }, (_, index) => ({ id: --setId, exercise_name: exercise.name, set_number: index + 1, reps: exercise.reps, weight_kg: weight }));
+    });
+    setPlanTargets(targets);
+    openWorkoutEditor({ template: { id: -routine.id, name: routine.name, date: selectedDate, notes: null, sets } });
+
+  }
+
   function openCardioEditor(session: Cardio | null = null) {
     setEditingCardio(session);
     openModal("cardio");
@@ -275,6 +311,8 @@ export default function App() {
     setEditingWorkout(null);
     setWorkoutTemplate(null);
     setEditingCardio(null);
+    setEditingRoutine(null);
+    setPlanTargets({});
   }
 
   const dayLabel = dayName(selectedDate);
@@ -339,6 +377,8 @@ export default function App() {
                 dayLog={dayLog}
                 habits={habits}
                 cardioToday={cardio.filter((session) => session.date === selectedDate)}
+                plansToday={routines.filter((routine) => routine.days.includes(weekdayIndex(selectedDate)))}
+                onStartPlan={startRoutine}
                 onLogSleep={() => openModal("sleep")}
                 onSaveSteps={(steps) => api.setSteps(selectedDate, steps).then(() => setDayLog((current) => ({ ...current, steps }))).catch(() => setError("Couldn't save steps."))}
                 onToggleHabit={toggleHabit}
@@ -375,6 +415,11 @@ export default function App() {
                 cardio={cardio}
                 onAddCardio={() => openCardioEditor()}
                 onEditCardio={(session) => openCardioEditor(session)}
+                routines={routines}
+                onAddRoutine={() => openRoutineEditor()}
+                onEditRoutine={(routine) => openRoutineEditor(routine)}
+                onStartRoutine={startRoutine}
+                onDeleteRoutine={(routine) => void runAction(() => api.deleteRoutine(routine.id), `"${routine.name}" deleted.`, { undoable: true })}
                 onDeleteCardio={(session) => void runAction(() => api.deleteCardio(session.id), `${cardioLabel(session.type)} deleted.`, { undoable: true })}
                 onAdd={() => openWorkoutEditor()}
                 onEdit={(workout) => openWorkoutEditor({ edit: workout })}
@@ -464,6 +509,7 @@ export default function App() {
             initial={editingWorkout ?? workoutTemplate}
             isEdit={Boolean(editingWorkout)}
             history={workouts}
+            planTargets={planTargets}
             busy={busy}
             error={error}
             date={editingWorkout?.date ?? selectedDate}
@@ -512,6 +558,19 @@ export default function App() {
             busy={busy}
             error={error}
             onSubmit={(body) => runAction(() => api.saveRecipe(body, editingFood?.id), editingFood ? "Recipe updated." : `${body.name} added to your library.`)}
+          />
+        </ModalShell>
+      )}
+      {modal === "routine" && (
+        <ModalShell title={editingRoutine ? "Edit plan" : "New plan"} eyebrow="WORKOUT PLANS" onClose={closeModal}>
+          <RoutineForm
+            key={editingRoutine?.id ?? "new"}
+            initial={editingRoutine}
+            exerciseNames={[...new Set(workouts.flatMap((workout) => workout.sets.map((set) => set.exercise_name)))]}
+            busy={busy}
+            error={error}
+            onSubmit={(body) => runAction(() => api.saveRoutine(body, editingRoutine?.id), editingRoutine ? "Plan updated." : `${body.name} plan created.`)}
+            onDelete={editingRoutine ? () => runAction(() => api.deleteRoutine(editingRoutine.id), `"${editingRoutine.name}" deleted.`, { undoable: true }) : undefined}
           />
         </ModalShell>
       )}
@@ -572,6 +631,8 @@ function DashboardPage({
   dayLog,
   habits,
   cardioToday,
+  plansToday,
+  onStartPlan,
   onLogSleep,
   onSaveSteps,
   onToggleHabit,
@@ -603,6 +664,8 @@ function DashboardPage({
   dayLog: DayLog;
   habits: HabitStatus[];
   cardioToday: Cardio[];
+  plansToday: Routine[];
+  onStartPlan: (routine: Routine) => void;
   onLogSleep: () => void;
   onSaveSteps: (steps: number | null) => Promise<unknown>;
   onToggleHabit: (habit: HabitStatus) => void;
@@ -761,7 +824,9 @@ function DashboardPage({
             <div><h3 className="font-semibold">{isToday ? "Today's" : `${day}'s`} training</h3><p className="mt-1 text-xs text-muted">Tap a session to edit it</p></div>
             <button onClick={onLogWorkout} className="rounded-lg border border-line p-2 text-muted transition hover:border-mint/50 hover:text-mint" aria-label="Log a workout"><Plus size={16} /></button>
           </div>
+          <TodayPlans routines={plansToday} loggedNames={data.workouts_today.map((workout) => workout.name)} onStart={onStartPlan} />
           {data.workouts_today.length === 0 && cardioToday.length === 0 ? (
+            plansToday.length ? null :
             <EmptyState icon={Dumbbell} title="No workout logged yet" detail="Your training log will appear here." action="Log a workout" onClick={onLogWorkout} />
           ) : (
             <div className="space-y-3">
@@ -1338,7 +1403,7 @@ const toDrafts = (workout: Workout, unit: Unit): SetDraft[] =>
     return { exercise_name: set.exercise_name, reps: String(set.reps), weight: shown, kg: set.weight_kg, shown };
   });
 
-function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: { initial: Workout | null; isEdit: boolean; history: Workout[]; busy: boolean; error: string; date: string; onSubmit: (body: WorkoutBody) => void }) {
+function WorkoutForm({ initial, isEdit, history, planTargets, busy, error, date, onSubmit }: { initial: Workout | null; isEdit: boolean; history: Workout[]; planTargets: Record<string, number>; busy: boolean; error: string; date: string; onSubmit: (body: WorkoutBody) => void }) {
   const [name, setName] = useState(initial?.name ?? "");
   const { unit } = usePrefs();
   const [sets, setSets] = useState<SetDraft[]>(initial ? toDrafts(initial, unit) : [{ exercise_name: "", reps: "", weight: "" }]);
@@ -1426,12 +1491,24 @@ function WorkoutForm({ initial, isEdit, history, busy, error, date, onSubmit }: 
             // Show "last time" once, above the first set of each exercise.
             const startsExercise = index === 0 || set.exercise_name.trim().toLowerCase() !== sets[index - 1].exercise_name.trim().toLowerCase();
             const previous = startsExercise ? lastTime(set.exercise_name) : null;
+            const increase = startsExercise ? suggestIncrease(set.exercise_name, past, planTargets[set.exercise_name.trim().toLowerCase()] ?? null, unit === "lb" ? 5 / 2.2046226218 : 2.5) : null;
+            const suggested = increase ? String(fromKg(increase.toKg, unit)) : "";
+            const exerciseKey = set.exercise_name.trim().toLowerCase();
+            const alreadyUsed = increase !== null && sets.filter((item) => item.exercise_name.trim().toLowerCase() === exerciseKey).every((item) => item.weight === suggested);
             return (
               <div key={index}>
                 {previous && (
                   <p className="mb-1 rounded-lg bg-mint/5 px-2.5 py-1.5 text-[10px] text-mint">
                     Last time ({dateLabel(previous.date)}): {previous.sets.map((item) => `${item.reps} × ${formatNumber(fromKg(item.weight_kg, unit))} ${unit}`).join(" · ")}
                   </p>
+                )}
+                {increase && (
+                  <div className="mb-1 flex items-center justify-between gap-2 rounded-lg bg-lime/10 px-2.5 py-1.5 text-[10px] text-lime">
+                    <span>You hit {increase.reps}+ reps at {formatNumber(fromKg(increase.fromKg, unit))} {unit} twice. {alreadyUsed ? "Filled in" : "Try"} {formatNumber(fromKg(increase.toKg, unit))} {unit}.</span>
+                    {!alreadyUsed && (
+                      <button type="button" onClick={() => setSets((current) => current.map((item) => (item.exercise_name.trim().toLowerCase() === exerciseKey ? { ...item, weight: suggested, kg: undefined, shown: undefined } : item)))} className="shrink-0 rounded-md bg-lime/20 px-2 py-1 font-semibold">Use</button>
+                    )}
+                  </div>
                 )}
                 <div className="grid grid-cols-[minmax(0,1fr)_60px_72px_30px] items-end gap-2">
                   <Field label={index === 0 ? "Exercise" : " "}><input value={set.exercise_name} list="exercise-names" onChange={(e) => updateSet(index, "exercise_name", e.target.value)} placeholder="Exercise name" className="input-dark !px-2.5" /></Field>
@@ -1511,9 +1588,9 @@ function TargetsForm({ context, onSaveProfile, targets, busy, error, onSubmit }:
   );
 }
 
-function WorkoutsPage({ workouts, cardio, onAdd, onEdit, onRepeat, onDelete, onAddCardio, onEditCardio, onDeleteCardio }: { workouts: Workout[]; cardio: Cardio[]; onAdd: () => void; onEdit: (workout: Workout) => void; onRepeat: (workout: Workout) => void; onDelete: (workout: Workout) => void; onAddCardio: () => void; onEditCardio: (session: Cardio) => void; onDeleteCardio: (session: Cardio) => void }) {
+function WorkoutsPage({ workouts, cardio, routines, onAdd, onEdit, onRepeat, onDelete, onAddCardio, onEditCardio, onDeleteCardio, onAddRoutine, onEditRoutine, onStartRoutine, onDeleteRoutine }: { workouts: Workout[]; cardio: Cardio[]; routines: Routine[]; onAdd: () => void; onEdit: (workout: Workout) => void; onRepeat: (workout: Workout) => void; onDelete: (workout: Workout) => void; onAddCardio: () => void; onEditCardio: (session: Cardio) => void; onDeleteCardio: (session: Cardio) => void; onAddRoutine: () => void; onEditRoutine: (routine: Routine) => void; onStartRoutine: (routine: Routine) => void; onDeleteRoutine: (routine: Routine) => void }) {
   const { unit } = usePrefs();
-  const [view, setView] = useState<"strength" | "cardio">("strength");
+  const [view, setView] = useState<"strength" | "cardio" | "plans">("strength");
   const personalRecords = useMemo(() => {
     const records = new Map<string, number>();
     workouts.forEach((workout) => workout.sets.forEach((set) => records.set(set.exercise_name, Math.max(records.get(set.exercise_name) ?? 0, set.weight_kg))));
@@ -1521,15 +1598,19 @@ function WorkoutsPage({ workouts, cardio, onAdd, onEdit, onRepeat, onDelete, onA
   }, [workouts]);
   return (
     <div className="mx-auto max-w-[1050px]">
-      <PageIntro eyebrow="TRAINING JOURNAL" title="Workouts" detail="Strength sets and cardio sessions. Both count toward your weekly target." action={<button onClick={view === "strength" ? onAdd : onAddCardio} className="button-primary !px-3"><Plus size={16} /> {view === "strength" ? "Workout" : "Cardio"}</button>} />
+      <PageIntro eyebrow="TRAINING JOURNAL" title="Workouts" detail="Strength sets and cardio sessions. Both count toward your weekly target." action={<button onClick={view === "strength" ? onAdd : view === "cardio" ? onAddCardio : onAddRoutine} className="button-primary !px-3"><Plus size={16} /> {view === "strength" ? "Workout" : view === "cardio" ? "Cardio" : "Plan"}</button>} />
       <div className="mb-4 flex rounded-xl border border-line bg-panel p-1">
-        {(["strength", "cardio"] as const).map((option) => (
+        {(["strength", "cardio", "plans"] as const).map((option) => (
           <button key={option} onClick={() => setView(option)} className={`flex-1 rounded-lg py-2 text-xs font-medium capitalize transition ${view === option ? "bg-mint text-night" : "text-muted"}`}>
-            {option} · {option === "strength" ? workouts.length : cardio.length}
+            {option} · {option === "strength" ? workouts.length : option === "cardio" ? cardio.length : routines.length}
           </button>
         ))}
       </div>
-      {view === "cardio" ? (
+      {view === "plans" ? (
+        routines.length === 0 ? <EmptyState icon={ClipboardList} title="No plans yet" detail="Set up routines like Push / Pull / Legs with days and target sets × reps. Start one in a tap and it fills in last time's weights." action="Create a plan" onClick={onAddRoutine} /> : (
+          <div className="space-y-3">{routines.map((routine) => <RoutineCard key={routine.id} routine={routine} onEdit={() => onEditRoutine(routine)} onStart={() => onStartRoutine(routine)} onDelete={() => onDeleteRoutine(routine)} />)}</div>
+        )
+      ) : view === "cardio" ? (
         cardio.length === 0 ? <EmptyState icon={Footprints} title="No cardio yet" detail="Log runs, walks, rides or swims with time, distance and calories." action="Log cardio" onClick={onAddCardio} /> : (
           <div className="space-y-3">{cardio.map((session) => <CardioCard key={session.id} session={session} onEdit={() => onEditCardio(session)} onDelete={() => onDeleteCardio(session)} />)}</div>
         )

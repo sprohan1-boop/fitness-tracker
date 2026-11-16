@@ -1,7 +1,8 @@
 // On-device data layer. Everything is stored in this browser's IndexedDB on the phone:
 // no server, works offline. Mirrors the calculations the old FastAPI backend did.
 import { sleepHours } from "./utils";
-import type { BackupStatus, BodyWeight, Cardio, EnergyEstimate, Fast, Profile, Recipe, CardioType, DayLog, FoodSource, Habit, HabitStatus, Measurement, MeasureKey, Sleep, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
+import { estimate1RM, guessMuscle } from "./training-logic";
+import type { BackupStatus, BodyWeight, Cardio, EnergyEstimate, Fast, Muscle, MuscleVolume, Profile, Recipe, Routine, CardioType, DayLog, FoodSource, Habit, HabitStatus, Measurement, MeasureKey, Sleep, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 type MealBody = { food_id: number; date: string; meal_type: string; portion_g: number };
@@ -15,7 +16,7 @@ type StoredMeal = Meal & { created_at: number };
 
 type State = {
   version: 1;
-  next_id: { food: number; meal: number; workout: number; set: number; weight: number; habit: number; cardio: number; measure: number; fast: number };
+  next_id: { food: number; meal: number; workout: number; set: number; weight: number; habit: number; cardio: number; measure: number; fast: number; routine: number };
   targets: Targets | null;
   foods: Food[];
   meals: StoredMeal[];
@@ -27,6 +28,9 @@ type State = {
   measurements: Measurement[];
   profile: Profile | null;
   fasts: Fast[];
+  routines: Routine[];
+  /** Your own exercise -> muscle choices (lowercased names); otherwise guessed from the name. */
+  exercise_muscles: Record<string, Muscle>;
   last_backup_at: number | null;
 };
 
@@ -44,6 +48,8 @@ export type ExportFile = {
   measurements?: Measurement[];
   profile?: Profile | null;
   fasts?: Fast[];
+  routines?: Routine[];
+  exercise_muscles?: Record<string, Muscle>;
 };
 
 const DB_NAME = "fitness-tracker";
@@ -51,7 +57,7 @@ const STORE = "kv";
 const KEY = "state";
 
 function emptyState(): State {
-  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1, habit: 1, cardio: 1, measure: 1, fast: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, habits: [], cardio: [], measurements: [], profile: null, fasts: [], last_backup_at: null };
+  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1, habit: 1, cardio: 1, measure: 1, fast: 1, routine: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, habits: [], cardio: [], measurements: [], profile: null, fasts: [], routines: [], exercise_muscles: {}, last_backup_at: null };
 }
 
 // Brings data saved by older versions of the app up to the current shape.
@@ -70,6 +76,9 @@ function migrate(state: State): State {
   state.profile ??= null;
   state.fasts ??= [];
   state.next_id.fast ??= nextAfter(state.fasts);
+  state.routines ??= [];
+  state.exercise_muscles ??= {};
+  state.next_id.routine ??= nextAfter(state.routines);
   if (state.targets) {
     state.targets.water_ml ??= null;
     state.targets.steps ??= null;
@@ -464,6 +473,80 @@ export const api = {
       editDay(state, date).note = note.slice(0, 2000);
     }),
 
+  // ---------- workout plans ----------
+
+  async routines(): Promise<Routine[]> {
+    return [...(await load()).routines].sort((a, b) => (Math.min(...a.days, 7) - Math.min(...b.days, 7)) || a.name.localeCompare(b.name));
+  },
+
+  saveRoutine: (body: Omit<Routine, "id">, id?: number) =>
+    mutate((state) => {
+      const name = body.name.trim();
+      if (!name || name.length > 60) fail("Plan names are 1–60 characters.");
+      const days = [...new Set(body.days)].filter((day) => Number.isInteger(day) && day >= 0 && day <= 6).sort();
+      if (body.exercises.length < 1 || body.exercises.length > 30) fail("Add between 1 and 30 exercises.");
+      const exercises = body.exercises.map((exercise) => {
+        const exerciseName = exercise.name.trim();
+        if (!exerciseName || exerciseName.length > 120) fail("Each exercise needs a name.");
+        if (!Number.isInteger(exercise.sets) || exercise.sets < 1 || exercise.sets > 20) fail("Sets must be 1–20.");
+        if (!Number.isInteger(exercise.reps) || exercise.reps < 1 || exercise.reps > 100) fail("Reps must be 1–100.");
+        return { name: exerciseName, sets: exercise.sets, reps: exercise.reps };
+      });
+      if (id === undefined) {
+        state.routines.push({ id: state.next_id.routine++, name, days, exercises });
+        return;
+      }
+      const index = state.routines.findIndex((routine) => routine.id === id);
+      if (index < 0) fail("Plan not found.");
+      state.routines[index] = { id, name, days, exercises };
+    }),
+
+  deleteRoutine: (id: number) =>
+    mutate((state) => {
+      state.routines = state.routines.filter((routine) => routine.id !== id);
+    }, { undoable: true }),
+
+  // ---------- muscle groups ----------
+
+  async exerciseMuscles(): Promise<Record<string, Muscle>> {
+    return { ...(await load()).exercise_muscles };
+  },
+
+  /** Your own choice of muscle for an exercise (null = go back to the automatic guess). */
+  setExerciseMuscle: (exercise: string, muscle: Muscle | null) =>
+    mutate((state) => {
+      const key = exercise.trim().toLowerCase();
+      if (!key) fail("Exercise name missing.");
+      if (muscle === null) delete state.exercise_muscles[key];
+      else state.exercise_muscles[key] = muscle;
+    }),
+
+  /** Working sets per muscle group over the `days` days ending on `end`. */
+  async muscleVolume(end: string, days = 7): Promise<MuscleVolume> {
+    const state = await load();
+    const startMs = toUtc(end) - (days - 1) * DAY_MS;
+    const counts = new Map<Muscle, number>();
+    const unassigned = new Map<string, { exercise: string; sets: number }>();
+    for (const workout of state.workouts) {
+      const ms = toUtc(workout.date);
+      if (ms < startMs || ms > toUtc(end)) continue;
+      for (const set of workout.sets) {
+        const key = set.exercise_name.toLowerCase();
+        const muscle = state.exercise_muscles[key] ?? guessMuscle(set.exercise_name);
+        if (muscle) counts.set(muscle, (counts.get(muscle) ?? 0) + 1);
+        else {
+          const entry = unassigned.get(key) ?? { exercise: set.exercise_name, sets: 0 };
+          entry.sets++;
+          unassigned.set(key, entry);
+        }
+      }
+    }
+    return {
+      muscles: [...counts.entries()].map(([muscle, sets]) => ({ muscle, sets })).sort((a, b) => b.sets - a.sets),
+      unassigned: [...unassigned.values()].sort((a, b) => b.sets - a.sets),
+    };
+  },
+
   // ---------- recipes ----------
 
   /**
@@ -805,8 +888,10 @@ export const api = {
     for (const workout of (await load()).workouts) {
       for (const set of workout.sets) {
         if (set.exercise_name.toLowerCase() !== key) continue;
-        const point = byDate.get(workout.date) ?? { date: workout.date, top_weight_kg: 0, reps_at_top: 0, volume_kg: 0, sets: 0 };
+        const point = byDate.get(workout.date) ?? { date: workout.date, top_weight_kg: 0, reps_at_top: 0, volume_kg: 0, sets: 0, e1rm_kg: null };
         point.sets++;
+        const e1rm = estimate1RM(set.weight_kg, set.reps);
+        if (e1rm !== null && (point.e1rm_kg === null || e1rm > point.e1rm_kg)) point.e1rm_kg = Math.round(e1rm * 10) / 10;
         point.volume_kg += set.reps * set.weight_kg;
         if (set.weight_kg > point.top_weight_kg || (set.weight_kg === point.top_weight_kg && set.reps > point.reps_at_top)) {
           point.top_weight_kg = set.weight_kg;
@@ -834,6 +919,8 @@ export const api = {
       measurements: [...state.measurements].sort((a, b) => a.date.localeCompare(b.date)),
       profile: state.profile,
       fasts: state.fasts,
+      routines: state.routines,
+      exercise_muscles: state.exercise_muscles,
     };
   },
 
@@ -874,6 +961,8 @@ export const api = {
       state.measurements = (Array.isArray(data.measurements) ? data.measurements : []).filter((entry) => entry && isNum(entry.id) && typeof entry.date === "string");
       state.profile = data.profile && typeof data.profile === "object" && isNum(data.profile.height_cm) ? data.profile : null;
       state.fasts = (Array.isArray(data.fasts) ? data.fasts : []).filter((fast) => fast && isNum(fast.id) && isNum(fast.start) && isNum(fast.goal_h));
+      state.routines = (Array.isArray(data.routines) ? data.routines : []).filter((routine) => routine && isNum(routine.id) && typeof routine.name === "string" && Array.isArray(routine.days) && Array.isArray(routine.exercises));
+      state.exercise_muscles = data.exercise_muscles && typeof data.exercise_muscles === "object" ? { ...data.exercise_muscles } : {};
       state.last_backup_at = Date.now(); // the file just restored from is a backup
       state.next_id = {
         food: maxId(foods.map((food) => food.id)),
@@ -885,6 +974,7 @@ export const api = {
         cardio: maxId(state.cardio.map((session) => session.id)),
         measure: maxId(state.measurements.map((entry) => entry.id)),
         fast: maxId(state.fasts.map((fast) => fast.id)),
+        routine: maxId(state.routines.map((routine) => routine.id)),
       };
       return { foods: foods.length, meals: meals.length, workouts: workouts.length };
     }),

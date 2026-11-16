@@ -52,9 +52,12 @@ Open `http://localhost:5173`. Production build: `npm run build`. For a sub-path 
 - Optional sugar, saturated fat and sodium per food (filled by barcode scans), with daily totals.
 - Measured daily burn on the Progress tab, from 28 days of food logs and the weigh-in trend.
 - Fasting timer with goals, "started earlier", and recent fasts.
+- Workout plans (routines with weekdays and target sets × reps); today's plan shows on the dashboard and Start fills in last time's weights.
+- Add-weight suggestions when every set hit the target reps at the same weight two sessions running (+2.5 kg / +5 lb).
+- Estimated 1RM per exercise (Epley, sets of 12 reps or fewer) and weekly sets per muscle group, with exercises matched to muscles by name.
 - Swipe left to delete with Undo (no confirmation pop-ups).
 - kg or lb for body weight and lifts (data is always stored in kg), and Auto / Dark / Light appearance. These are per-device settings, not part of backups.
 - Backups through the iOS share sheet with a 7-day reminder, and restore from a backup file.
 - Installable, offline-capable PWA that checks for updates whenever it's opened; charts and the scanner load on demand.
 
-Code: `src/api.ts` (data layer), `src/App.tsx` (main UI), `src/Health.tsx` (sleep, steps, habits, cardio), `src/Nutrition.tsx` (recipes, target calculator, fasting), `src/Progress.tsx` + `src/Measurements.tsx` (Progress tab), `src/ui.tsx`, `src/Barcode.tsx`, `src/RestTimer.tsx`, `src/Swipe.tsx`, `src/prefs.ts` (units/theme), `src/utils.ts`.
+Code: `src/api.ts` (data layer), `src/App.tsx` (main UI), `src/Health.tsx` (sleep, steps, habits, cardio), `src/Nutrition.tsx` (recipes, target calculator, fasting), `src/Training.tsx` + `src/training-logic.ts` (plans, muscle groups, 1RM, progression), `src/Progress.tsx` + `src/Measurements.tsx` (Progress tab), `src/ui.tsx`, `src/Barcode.tsx`, `src/RestTimer.tsx`, `src/Swipe.tsx`, `src/prefs.ts` (units/theme), `src/utils.ts`.
