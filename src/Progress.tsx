@@ -6,8 +6,9 @@ import { api } from "./api";
 import { SwipeToDelete } from "./Swipe";
 import { MeasurementsSection } from "./Measurements";
 import { MuscleSection } from "./Training";
+import { GoalsSection, WeekSummaryView, weekStartOf } from "./Insights";
 import { chartColors, fromKg, resolvedTheme, toKg, usePrefs } from "./prefs";
-import type { BodyWeight, EnergyEstimate, Muscle, MuscleVolume, ExercisePoint, ExerciseSummary, Measurement, MeasureKey, Trends } from "./types";
+import type { BodyWeight, EnergyEstimate, FitnessGoal, GoalStatus, Muscle, MuscleVolume, WeekSummary, ExercisePoint, ExerciseSummary, Measurement, MeasureKey, Trends } from "./types";
 import { addDays, dateLabel, formatHours, formatNumber, localDate, shortDate } from "./utils";
 
 /** Chart colours and styles for the current theme. */
@@ -34,6 +35,11 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [energy, setEnergy] = useState<EnergyEstimate | null>(null);
   const [volume, setVolume] = useState<MuscleVolume | null>(null);
+  const [goals, setGoals] = useState<GoalStatus[]>([]);
+  const [savingGoal, setSavingGoal] = useState(false);
+  const thisWeek = weekStartOf(localDate());
+  const [summaryWeek, setSummaryWeek] = useState(addDays(thisWeek, -7)); // last complete week
+  const [summary, setSummary] = useState<WeekSummary | null>(null);
   const [savingMeasure, setSavingMeasure] = useState(false);
   const chartTheme = useChartTheme();
 
@@ -42,6 +48,7 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
       const [nextTrends, nextWeights, nextExercises, nextMeasurements, nextEnergy] = await Promise.all([api.trends(localDate(), range), api.weights(), api.exercises(), api.measurements(), api.energyEstimate(localDate())]);
       setEnergy(nextEnergy);
       setVolume(await api.muscleVolume(localDate(), 7));
+      setGoals(await api.goals(localDate()));
       setTrends(nextTrends);
       setWeights(nextWeights);
       setExercises(nextExercises);
@@ -52,6 +59,7 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
   }, [range, onError, version]); // version: reload after any change elsewhere (e.g. Undo)
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void api.weekSummary(summaryWeek).then(setSummary); }, [summaryWeek, version]);
 
   return (
     <div className="mx-auto max-w-[1050px]">
@@ -70,6 +78,26 @@ export function ProgressPage({ version, onError, onUndoableDelete }: { version: 
         </div>
       </div>
 
+      <GoalsSection
+        goals={goals}
+        exercises={exercises.map((exercise) => exercise.name)}
+        busy={savingGoal}
+        onSave={async (body: Omit<FitnessGoal, "id" | "start_value" | "start_date">) => {
+          setSavingGoal(true);
+          try {
+            await api.saveGoal(body, localDate());
+            await load();
+            return true;
+          } catch (cause) {
+            onError(cause instanceof Error ? cause.message : "Couldn't save the goal.");
+            return false;
+          } finally {
+            setSavingGoal(false);
+          }
+        }}
+        onDelete={(goal) => void onUndoableDelete(() => api.deleteGoal(goal.id), "Goal deleted.")}
+      />
+      {summary && <WeekSummaryView summary={summary} canGoForward={summaryWeek < thisWeek} onStep={(weeks) => setSummaryWeek((current) => addDays(current, weeks * 7))} />}
       {trends && <TrendsSection trends={trends} range={range} />}
       <WeightSection weights={weights} range={range} onChanged={load} onError={onError} onDelete={(entry) => void onUndoableDelete(() => api.deleteWeight(entry.id), `Weigh-in from ${dateLabel(entry.date)} deleted.`)} />
       {energy && <EnergySection energy={energy} calorieTarget={trends?.targets.calories ?? null} />}

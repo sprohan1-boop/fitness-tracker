@@ -2,7 +2,7 @@
 // no server, works offline. Mirrors the calculations the old FastAPI backend did.
 import { sleepHours } from "./utils";
 import { estimate1RM, guessMuscle } from "./training-logic";
-import type { BackupStatus, BodyWeight, Cardio, EnergyEstimate, Fast, Muscle, MuscleVolume, Profile, Recipe, Routine, CardioType, DayLog, FoodSource, Habit, HabitStatus, Measurement, MeasureKey, Sleep, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
+import type { BackupStatus, BodyWeight, Cardio, EnergyEstimate, Fast, FitnessGoal, GoalStatus, Muscle, WeekSummary, MuscleVolume, Profile, Recipe, Routine, CardioType, DayLog, FoodSource, Habit, HabitStatus, Measurement, MeasureKey, Sleep, DashboardData, ExercisePoint, ExerciseSummary, Food, Meal, Targets, TrendDay, Trends, Workout, WorkoutSet } from "./types";
 
 type FoodBody = Omit<Food, "id" | "source" | "is_verified">;
 type MealBody = { food_id: number; date: string; meal_type: string; portion_g: number };
@@ -16,7 +16,7 @@ type StoredMeal = Meal & { created_at: number };
 
 type State = {
   version: 1;
-  next_id: { food: number; meal: number; workout: number; set: number; weight: number; habit: number; cardio: number; measure: number; fast: number; routine: number };
+  next_id: { food: number; meal: number; workout: number; set: number; weight: number; habit: number; cardio: number; measure: number; fast: number; routine: number; goal: number };
   targets: Targets | null;
   foods: Food[];
   meals: StoredMeal[];
@@ -29,6 +29,9 @@ type State = {
   profile: Profile | null;
   fasts: Fast[];
   routines: Routine[];
+  goals: FitnessGoal[];
+  /** Week start (YYYY-MM-DD) of the weekly summary card you dismissed. */
+  summary_dismissed: string | null;
   /** Your own exercise -> muscle choices (lowercased names); otherwise guessed from the name. */
   exercise_muscles: Record<string, Muscle>;
   last_backup_at: number | null;
@@ -50,6 +53,7 @@ export type ExportFile = {
   fasts?: Fast[];
   routines?: Routine[];
   exercise_muscles?: Record<string, Muscle>;
+  goals?: FitnessGoal[];
 };
 
 const DB_NAME = "fitness-tracker";
@@ -57,7 +61,7 @@ const STORE = "kv";
 const KEY = "state";
 
 function emptyState(): State {
-  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1, habit: 1, cardio: 1, measure: 1, fast: 1, routine: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, habits: [], cardio: [], measurements: [], profile: null, fasts: [], routines: [], exercise_muscles: {}, last_backup_at: null };
+  return { version: 1, next_id: { food: 1, meal: 1, workout: 1, set: 1, weight: 1, habit: 1, cardio: 1, measure: 1, fast: 1, routine: 1, goal: 1 }, targets: null, foods: [], meals: [], workouts: [], weights: [], days: {}, habits: [], cardio: [], measurements: [], profile: null, fasts: [], routines: [], exercise_muscles: {}, goals: [], summary_dismissed: null, last_backup_at: null };
 }
 
 // Brings data saved by older versions of the app up to the current shape.
@@ -79,6 +83,9 @@ function migrate(state: State): State {
   state.routines ??= [];
   state.exercise_muscles ??= {};
   state.next_id.routine ??= nextAfter(state.routines);
+  state.goals ??= [];
+  state.summary_dismissed ??= null;
+  state.next_id.goal ??= nextAfter(state.goals);
   if (state.targets) {
     state.targets.water_ml ??= null;
     state.targets.steps ??= null;
@@ -472,6 +479,184 @@ export const api = {
     mutate((state) => {
       editDay(state, date).note = note.slice(0, 2000);
     }),
+
+  // ---------- weekly summary ----------
+
+  /** Summary of the Monday–Sunday week starting `start`, compared with the week before. */
+  async weekSummary(start: string): Promise<WeekSummary> {
+    const state = await load();
+    const startMs = toUtc(start);
+    const dates = (from: number) => Array.from({ length: 7 }, (_, i) => fromUtc(from + i * DAY_MS));
+    const thisWeek = dates(startMs);
+    const lastWeek = dates(startMs - 7 * DAY_MS);
+    const avg = (values: number[]) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
+
+    const numbers = (days: string[]) => {
+      const set = new Set(days);
+      const intake = new Map<string, { kcal: number; protein: number }>();
+      for (const meal of state.meals) {
+        if (!set.has(meal.date)) continue;
+        const day = intake.get(meal.date) ?? { kcal: 0, protein: 0 };
+        day.kcal += meal.calories;
+        day.protein += meal.protein_g;
+        intake.set(meal.date, day);
+      }
+      const logs = days.map((day) => fullDay(state.days[day]));
+      return {
+        intake,
+        logs,
+        calories_avg: avg([...intake.values()].map((day) => day.kcal)),
+        protein_avg: avg([...intake.values()].map((day) => day.protein)),
+        sessions: state.workouts.filter((w) => set.has(w.date)).length + state.cardio.filter((c) => set.has(c.date)).length,
+        sleep_avg_h: avg(logs.filter((log) => log.sleep).map((log) => sleepHours(log.sleep!.bed, log.sleep!.wake))),
+        steps_avg: avg(logs.filter((log) => log.steps != null).map((log) => log.steps as number)),
+        weight_avg: avg(state.weights.filter((entry) => set.has(entry.date)).map((entry) => entry.weight_kg)),
+      };
+    };
+    const current = numbers(thisWeek);
+    const previous = numbers(lastWeek);
+    const inWeek = new Set(thisWeek);
+    const target = state.targets?.calories ?? null;
+
+    // New bests: heaviest set this week beats everything logged before the week.
+    const new_bests: { exercise: string; weight_kg: number }[] = [];
+    const weekTop = new Map<string, { name: string; kg: number }>();
+    for (const workout of state.workouts.filter((w) => inWeek.has(w.date))) {
+      for (const set of workout.sets) {
+        const key = set.exercise_name.toLowerCase();
+        if (set.weight_kg > (weekTop.get(key)?.kg ?? 0)) weekTop.set(key, { name: set.exercise_name, kg: set.weight_kg });
+      }
+    }
+    for (const [key, top] of weekTop) {
+      const before = state.workouts.filter((w) => w.date < start).flatMap((w) => w.sets).filter((set) => set.exercise_name.toLowerCase() === key);
+      if (before.length && top.kg > Math.max(...before.map((set) => set.weight_kg))) new_bests.push({ exercise: top.name, weight_kg: top.kg });
+    }
+
+    const cardio = state.cardio.filter((c) => inWeek.has(c.date));
+    const activeHabits = state.habits.filter((habit) => !habit.archived).map((habit) => habit.id);
+    const habitDone = current.logs.reduce((sum, log) => sum + log.habits_done.filter((id) => activeHabits.includes(id)).length, 0);
+    const water = current.logs.filter((log) => log.water_ml > 0).map((log) => log.water_ml);
+    const strength = state.workouts.filter((w) => inWeek.has(w.date));
+    const strip = ({ intake: _i, logs: _l, ...rest }: ReturnType<typeof numbers>) => rest;
+
+    return {
+      start,
+      end: thisWeek[6],
+      has_data: current.intake.size > 0 || current.sessions > 0 || current.weight_avg !== null || current.sleep_avg_h !== null,
+      food: {
+        days_logged: current.intake.size,
+        calories_avg: current.calories_avg,
+        protein_avg: current.protein_avg,
+        days_on_target: target ? [...current.intake.values()].filter((day) => Math.abs(day.kcal - target) <= target * 0.1).length : null,
+        calorie_target: target,
+      },
+      training: {
+        strength: strength.length,
+        cardio: cardio.length,
+        sets: strength.reduce((sum, w) => sum + w.sets.length, 0),
+        cardio_minutes: cardio.reduce((sum, c) => sum + c.minutes, 0),
+        cardio_km: cardio.reduce((sum, c) => sum + (c.distance_km ?? 0), 0),
+        target: state.targets?.workouts_per_week ?? null,
+        new_bests,
+      },
+      body: {
+        weight_avg: current.weight_avg,
+        weight_change: current.weight_avg !== null && previous.weight_avg !== null ? current.weight_avg - previous.weight_avg : null,
+        sleep_avg_h: current.sleep_avg_h,
+        nights: current.logs.filter((log) => log.sleep).length,
+        steps_avg: current.steps_avg,
+        water_avg_ml: avg(water),
+      },
+      habits: { done: habitDone, possible: activeHabits.length * 7 },
+      current: strip(current),
+      previous: strip(previous),
+    };
+  },
+
+  async summaryDismissed(): Promise<string | null> {
+    return (await load()).summary_dismissed;
+  },
+
+  dismissSummary: (weekStart: string) =>
+    mutate((state) => {
+      state.summary_dismissed = weekStart;
+    }),
+
+  // ---------- goals ----------
+
+  /** Goals with progress and a projection from the recent trend (least-squares over the last 6 weeks). */
+  async goals(today: string): Promise<GoalStatus[]> {
+    const state = await load();
+    const todayMs = toUtc(today);
+    return state.goals.map((goal) => {
+      // The data series for this goal: [date, value] in stored units.
+      let series: [string, number][] = [];
+      if (goal.kind === "weight") series = state.weights.map((entry) => [entry.date, entry.weight_kg]);
+      else if (goal.kind === "measure" && goal.measure) series = state.measurements.filter((entry) => entry[goal.measure!] != null).map((entry) => [entry.date, entry[goal.measure!] as number]);
+      else if (goal.kind === "lift" && goal.exercise) {
+        const key = goal.exercise.toLowerCase();
+        const best = new Map<string, number>();
+        for (const workout of state.workouts) for (const set of workout.sets) if (set.exercise_name.toLowerCase() === key) best.set(workout.date, Math.max(best.get(workout.date) ?? 0, set.weight_kg));
+        series = [...best.entries()];
+      }
+      series.sort((a, b) => a[0].localeCompare(b[0]));
+      const up = goal.target >= goal.start_value;
+      // Lifts: your best so far counts; body numbers: the latest value.
+      const current = !series.length ? null : goal.kind === "lift" ? Math.max(...series.map(([, v]) => v)) : series[series.length - 1][1];
+      const span = goal.target - goal.start_value;
+      const percent = current === null ? 0 : span === 0 ? 100 : Math.max(0, Math.min(100, ((current - goal.start_value) / span) * 100));
+      const base = { goal, current, percent, per_week: null as number | null, projected_date: null as string | null };
+      if (current === null) return { ...base, status: "no_data" as const };
+      if (up ? current >= goal.target : current <= goal.target) return { ...base, percent: 100, status: "reached" as const };
+
+      const recent = series.filter(([date]) => toUtc(date) >= todayMs - 42 * DAY_MS);
+      const days = recent.length >= 2 ? (toUtc(recent[recent.length - 1][0]) - toUtc(recent[0][0])) / DAY_MS : 0;
+      if (recent.length < 2 || days < 7) return { ...base, status: "no_trend" as const };
+      const xs = recent.map(([date]) => toUtc(date) / DAY_MS);
+      const ys = recent.map(([, value]) => value);
+      const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+      const denominator = xs.reduce((acc, x) => acc + (x - mx) ** 2, 0);
+      const slope = denominator ? xs.reduce((acc, x, i) => acc + (x - mx) * (ys[i] - my), 0) / denominator : 0;
+      const per_week = slope * 7;
+      if (slope === 0 || (up ? slope < 0 : slope > 0)) return { ...base, per_week, status: "away" as const };
+      const daysToGo = Math.ceil((goal.target - current) / slope);
+      const projected_date = fromUtc(todayMs + Math.min(daysToGo, 3650) * DAY_MS);
+      const status = goal.deadline && projected_date > goal.deadline ? "behind" as const : "on_track" as const;
+      return { ...base, per_week, projected_date, status };
+    });
+  },
+
+  /** New goals record the current value as the starting point. */
+  saveGoal: (body: Omit<FitnessGoal, "id" | "start_value" | "start_date">, today: string, id?: number) =>
+    mutate((state) => {
+      if (!["weight", "lift", "measure"].includes(body.kind)) fail("Choose a goal type.");
+      if (body.kind === "lift" && !body.exercise?.trim()) fail("Choose an exercise.");
+      if (body.kind === "measure" && !body.measure) fail("Choose a measurement.");
+      if (!isNum(body.target) || body.target <= 0) fail("Enter a target value.");
+      if (body.deadline && body.deadline <= today) fail("The deadline must be in the future.");
+      const clean = { kind: body.kind, exercise: body.kind === "lift" ? body.exercise!.trim() : null, measure: body.kind === "measure" ? body.measure : null, target: Math.round(body.target * 100) / 100, deadline: body.deadline || null };
+      if (id !== undefined) {
+        const goal = state.goals.find((item) => item.id === id) ?? fail("FitnessGoal not found.");
+        Object.assign(goal, clean);
+        return;
+      }
+      let start_value: number | null = null;
+      if (clean.kind === "weight") start_value = [...state.weights].sort((a, b) => a.date.localeCompare(b.date)).at(-1)?.weight_kg ?? null;
+      if (clean.kind === "measure") start_value = [...state.measurements].sort((a, b) => a.date.localeCompare(b.date)).filter((entry) => entry[clean.measure!] != null).at(-1)?.[clean.measure!] ?? null;
+      if (clean.kind === "lift") {
+        const key = clean.exercise!.toLowerCase();
+        const weights = state.workouts.flatMap((w) => w.sets).filter((set) => set.exercise_name.toLowerCase() === key).map((set) => set.weight_kg);
+        start_value = weights.length ? Math.max(...weights) : null;
+      }
+      if (start_value === null) fail(clean.kind === "weight" ? "Log a weigh-in first, so progress has a starting point." : clean.kind === "lift" ? "Log this exercise at least once first." : "Log this measurement at least once first.");
+      state.goals.push({ id: state.next_id.goal++, ...clean, start_value, start_date: today });
+    }),
+
+  deleteGoal: (id: number) =>
+    mutate((state) => {
+      state.goals = state.goals.filter((goal) => goal.id !== id);
+    }, { undoable: true }),
 
   // ---------- workout plans ----------
 
@@ -921,6 +1106,7 @@ export const api = {
       fasts: state.fasts,
       routines: state.routines,
       exercise_muscles: state.exercise_muscles,
+      goals: state.goals,
     };
   },
 
@@ -963,6 +1149,7 @@ export const api = {
       state.fasts = (Array.isArray(data.fasts) ? data.fasts : []).filter((fast) => fast && isNum(fast.id) && isNum(fast.start) && isNum(fast.goal_h));
       state.routines = (Array.isArray(data.routines) ? data.routines : []).filter((routine) => routine && isNum(routine.id) && typeof routine.name === "string" && Array.isArray(routine.days) && Array.isArray(routine.exercises));
       state.exercise_muscles = data.exercise_muscles && typeof data.exercise_muscles === "object" ? { ...data.exercise_muscles } : {};
+      state.goals = (Array.isArray(data.goals) ? data.goals : []).filter((goal) => goal && isNum(goal.id) && isNum(goal.target) && isNum(goal.start_value));
       state.last_backup_at = Date.now(); // the file just restored from is a backup
       state.next_id = {
         food: maxId(foods.map((food) => food.id)),
@@ -975,6 +1162,7 @@ export const api = {
         measure: maxId(state.measurements.map((entry) => entry.id)),
         fast: maxId(state.fasts.map((fast) => fast.id)),
         routine: maxId(state.routines.map((routine) => routine.id)),
+        goal: maxId(state.goals.map((goal) => goal.id)),
       };
       return { foods: foods.length, meals: meals.length, workouts: workouts.length };
     }),

@@ -74,6 +74,41 @@ export type Muscle = "chest" | "back" | "shoulders" | "biceps" | "triceps" | "le
 /** A planned workout: which weekdays (0 = Monday … 6 = Sunday) and target sets × reps per exercise. */
 export type Routine = { id: number; name: string; days: number[]; exercises: { name: string; sets: number; reps: number }[] };
 
+/** Goal values are stored in kg (weight, lift), cm (measurements) or % (body fat). */
+export type FitnessGoal = {
+  id: number;
+  kind: "weight" | "lift" | "measure";
+  exercise: string | null; // lift goals
+  measure: MeasureKey | null; // measurement goals
+  target: number;
+  start_value: number;
+  start_date: string;
+  deadline: string | null;
+};
+
+export type GoalStatus = {
+  goal: FitnessGoal;
+  current: number | null;
+  percent: number; // 0–100 of the way from start to target
+  per_week: number | null; // trend, in stored units per week
+  projected_date: string | null;
+  status: "reached" | "on_track" | "behind" | "away" | "no_trend" | "no_data";
+};
+
+type WeekNumbers = { calories_avg: number | null; protein_avg: number | null; sessions: number; sleep_avg_h: number | null; steps_avg: number | null; weight_avg: number | null };
+
+export type WeekSummary = {
+  start: string;
+  end: string;
+  has_data: boolean;
+  food: { days_logged: number; calories_avg: number | null; protein_avg: number | null; days_on_target: number | null; calorie_target: number | null };
+  training: { strength: number; cardio: number; sets: number; cardio_minutes: number; cardio_km: number; target: number | null; new_bests: { exercise: string; weight_kg: number }[] };
+  body: { weight_avg: number | null; weight_change: number | null; sleep_avg_h: number | null; nights: number; steps_avg: number | null; water_avg_ml: number | null };
+  habits: { done: number; possible: number };
+  previous: WeekNumbers;
+  current: WeekNumbers;
+};
+
 export type MuscleVolume = { muscles: { muscle: Muscle; sets: number }[]; unassigned: { exercise: string; sets: number }[] };
 
 export type Food = {

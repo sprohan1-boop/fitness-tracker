@@ -55,9 +55,11 @@ Open `http://localhost:5173`. Production build: `npm run build`. For a sub-path 
 - Workout plans (routines with weekdays and target sets × reps); today's plan shows on the dashboard and Start fills in last time's weights.
 - Add-weight suggestions when every set hit the target reps at the same weight two sessions running (+2.5 kg / +5 lb).
 - Estimated 1RM per exercise (Epley, sets of 12 reps or fewer) and weekly sets per muscle group, with exercises matched to muscles by name.
+- Weekly summary: a dashboard card for last week (dismissible) and a full Monday–Sunday summary on the Progress tab for any week, compared with the week before.
+- Goals for body weight, a lift or a measurement, with optional deadlines and a projected date from the last 6 weeks' trend.
 - Swipe left to delete with Undo (no confirmation pop-ups).
 - kg or lb for body weight and lifts (data is always stored in kg), and Auto / Dark / Light appearance. These are per-device settings, not part of backups.
 - Backups through the iOS share sheet with a 7-day reminder, and restore from a backup file.
 - Installable, offline-capable PWA that checks for updates whenever it's opened; charts and the scanner load on demand.
 
-Code: `src/api.ts` (data layer), `src/App.tsx` (main UI), `src/Health.tsx` (sleep, steps, habits, cardio), `src/Nutrition.tsx` (recipes, target calculator, fasting), `src/Training.tsx` + `src/training-logic.ts` (plans, muscle groups, 1RM, progression), `src/Progress.tsx` + `src/Measurements.tsx` (Progress tab), `src/ui.tsx`, `src/Barcode.tsx`, `src/RestTimer.tsx`, `src/Swipe.tsx`, `src/prefs.ts` (units/theme), `src/utils.ts`.
+Code: `src/api.ts` (data layer), `src/App.tsx` (main UI), `src/Health.tsx` (sleep, steps, habits, cardio), `src/Nutrition.tsx` (recipes, target calculator, fasting), `src/Training.tsx` + `src/training-logic.ts` (plans, muscle groups, 1RM, progression), `src/Insights.tsx` (weekly summary, goals), `src/Progress.tsx` + `src/Measurements.tsx` (Progress tab), `src/ui.tsx`, `src/Barcode.tsx`, `src/RestTimer.tsx`, `src/Swipe.tsx`, `src/prefs.ts` (units/theme), `src/utils.ts`.

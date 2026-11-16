@@ -46,6 +46,7 @@ import { SwipeToDelete } from "./Swipe";
 import { Field, FormError, ModalShell, NumberField } from "./ui";
 import { FastingCard, RecipeForm, TargetCalculator } from "./Nutrition";
 import { RoutineCard, RoutineForm, TodayPlans, weekdayIndex } from "./Training";
+import { WeekSummaryCard, weekStartOf } from "./Insights";
 import { suggestIncrease } from "./training-logic";
 import { CardioCard, CardioForm, HabitsCard, HabitsManager, SleepCard, SleepForm, StepsCard, cardioLabel } from "./Health";
 import { BarcodeScanner, lookupBarcode } from "./Barcode";
@@ -53,7 +54,7 @@ import { fromKg, setPrefs, toKg, usePrefs } from "./prefs";
 import { currentPrefs } from "./prefs";
 const prefsUnit = () => currentPrefs().unit;
 import type { ThemePref, Unit } from "./prefs";
-import type { BackupStatus, Cardio, DashboardData, Routine, DayLog, EnergyEstimate, Fast, FoodSource, HabitStatus, Profile, Food, Meal, Serving, Targets, Workout } from "./types";
+import type { BackupStatus, Cardio, DashboardData, Routine, WeekSummary, DayLog, EnergyEstimate, Fast, FoodSource, HabitStatus, Profile, Food, Meal, Serving, Targets, Workout } from "./types";
 
 type Page = "dashboard" | "foods" | "workouts" | "progress" | "settings";
 type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | "recipe" | "routine" | null;
@@ -143,6 +144,7 @@ export default function App() {
   const [cardio, setCardio] = useState<Cardio[]>([]);
   const [editingCardio, setEditingCardio] = useState<Cardio | null>(null);
   const [routines, setRoutines] = useState<Routine[]>([]);
+  const [weekCard, setWeekCard] = useState<WeekSummary | null>(null);
   const [editingRoutine, setEditingRoutine] = useState<Routine | null>(null);
   /** Target reps per exercise (lowercased) when a workout was started from a plan. */
   const [planTargets, setPlanTargets] = useState<Record<string, number>>({});
@@ -167,6 +169,10 @@ export default function App() {
     ]);
     const [nextHabits, nextCardio, nextFasting, nextRoutines] = await Promise.all([api.habits(selectedDate), api.cardio(), api.fasting(), api.routines()]);
     setRoutines(nextRoutines);
+    // Last week's summary card, until dismissed.
+    const lastWeek = addDays(weekStartOf(localDate()), -7);
+    const [summary, dismissed] = await Promise.all([api.weekSummary(lastWeek), api.summaryDismissed()]);
+    setWeekCard(summary.has_data && dismissed !== lastWeek ? summary : null);
     setFasting(nextFasting);
     setDayLog(nextDay);
     setHabits(nextHabits);
@@ -377,6 +383,9 @@ export default function App() {
                 dayLog={dayLog}
                 habits={habits}
                 cardioToday={cardio.filter((session) => session.date === selectedDate)}
+                weekSummary={selectedDate === localDate() ? weekCard : null}
+                onOpenSummary={() => setPage("progress")}
+                onDismissSummary={(start) => { setWeekCard(null); void api.dismissSummary(start); }}
                 plansToday={routines.filter((routine) => routine.days.includes(weekdayIndex(selectedDate)))}
                 onStartPlan={startRoutine}
                 onLogSleep={() => openModal("sleep")}
@@ -631,6 +640,9 @@ function DashboardPage({
   dayLog,
   habits,
   cardioToday,
+  weekSummary,
+  onOpenSummary,
+  onDismissSummary,
   plansToday,
   onStartPlan,
   onLogSleep,
@@ -664,6 +676,9 @@ function DashboardPage({
   dayLog: DayLog;
   habits: HabitStatus[];
   cardioToday: Cardio[];
+  weekSummary: WeekSummary | null;
+  onOpenSummary: () => void;
+  onDismissSummary: (weekStart: string) => void;
   plansToday: Routine[];
   onStartPlan: (routine: Routine) => void;
   onLogSleep: () => void;
@@ -718,6 +733,7 @@ function DashboardPage({
 
       <DateSwitcher date={date} onChange={onDateChange} />
       <BackupBanner backup={backup} onBackup={onBackup} onOpenSettings={() => onNavigate("settings")} />
+      {weekSummary && <WeekSummaryCard summary={weekSummary} onOpen={onOpenSummary} onDismiss={() => onDismissSummary(weekSummary.start)} />}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
         <section className="rounded-3xl border border-line bg-panel p-4 sm:p-6">
