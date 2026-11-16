@@ -318,7 +318,7 @@ export const api = {
   createFood: (body: FoodBody & { source?: FoodSource }) =>
     mutate((state) => {
       const { source, ...rest } = body;
-      const food: Food = { ...cleanFood(rest), id: state.next_id.food++, source: source === "open-food-facts" || source === "usda" ? source : "user-entered", is_verified: false };
+      const food: Food = { ...cleanFood(rest), id: state.next_id.food++, source: source === "open-food-facts" || source === "usda" || source === "ai" ? source : "user-entered", is_verified: false };
       state.foods.push(food);
       return food;
     }),
@@ -479,6 +479,67 @@ export const api = {
     mutate((state) => {
       editDay(state, date).note = note.slice(0, 2000);
     }),
+
+  // ---------- AI coach snapshot ----------
+
+  /** A compact text summary of recent data for the AI coach (sent only when you ask it something). */
+  async coachSnapshot(today: string): Promise<string> {
+    const state = await load();
+    const r = (value: number) => Math.round(value);
+    const lines: string[] = [];
+    if (state.profile) {
+      const p = state.profile;
+      lines.push(`Profile: ${p.sex}, age ${new Date().getFullYear() - p.birth_year}, height ${p.height_cm} cm, activity ${p.activity}, goal ${p.goal}.`);
+    }
+    const t = state.targets;
+    if (t) lines.push(`Targets: ${[t.calories && `${t.calories} kcal`, t.protein_g && `${t.protein_g} g protein`, t.carbohydrates_g && `${t.carbohydrates_g} g carbs`, t.fat_g && `${t.fat_g} g fat`, t.fiber_g && `${t.fiber_g} g fiber`, t.workouts_per_week && `${t.workouts_per_week} workouts/week`, t.steps && `${t.steps} steps/day`, t.water_ml && `${t.water_ml} ml water/day`].filter(Boolean).join(", ") || "none set"}.`);
+
+    lines.push("Last 14 days (date: kcal, protein g, carbs g, fat g | sessions | sleep h | steps | water ml):");
+    const trend = await api.trends(today, 14);
+    for (const day of trend.days) {
+      const log = fullDay(state.days[day.date]);
+      const food = day.logged ? `${r(day.calories)} kcal, ${r(day.protein_g)}p, ${r(day.carbohydrates_g)}c, ${r(day.fat_g)}f` : "no food logged";
+      lines.push(`${day.date}: ${food} | ${day.workouts} | ${day.sleep_h === null ? "-" : day.sleep_h.toFixed(1)} | ${day.steps ?? "-"} | ${log.water_ml || "-"}`);
+    }
+    lines.push(`Streaks: food logged ${trend.food_streak} days in a row; workout target met ${trend.workout_week_streak} weeks in a row.`);
+
+    const weights = state.weights.filter((entry) => entry.date >= fromUtc(toUtc(today) - 42 * DAY_MS)).sort((a, b) => a.date.localeCompare(b.date));
+    if (weights.length) lines.push(`Weigh-ins (last 6 weeks, kg): ${weights.map((entry) => `${entry.date} ${entry.weight_kg}`).join("; ")}.`);
+    const energy = await api.energyEstimate(today);
+    if (energy.ready) lines.push(`Measured daily burn: about ${energy.tdee} kcal (avg intake ${energy.intake_avg} kcal, weight trend ${energy.kg_per_week} kg/week).`);
+
+    const goals = await api.goals(today);
+    for (const g of goals) {
+      const what = g.goal.kind === "weight" ? "body weight" : g.goal.kind === "lift" ? `${g.goal.exercise} (top set)` : g.goal.measure;
+      lines.push(`Goal: ${what} from ${g.goal.start_value} to ${g.goal.target}${g.goal.deadline ? ` by ${g.goal.deadline}` : ""}; now ${g.current ?? "?"}; status ${g.status}${g.projected_date ? `, projected ${g.projected_date}` : ""}.`);
+    }
+
+    const recentWorkouts = [...state.workouts].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8);
+    for (const w of recentWorkouts) {
+      const tops = new Map<string, { kg: number; reps: number; sets: number }>();
+      for (const set of w.sets) {
+        const top = tops.get(set.exercise_name) ?? { kg: 0, reps: 0, sets: 0 };
+        top.sets++;
+        if (set.weight_kg >= top.kg) { top.kg = set.weight_kg; top.reps = set.reps; }
+        tops.set(set.exercise_name, top);
+      }
+      lines.push(`Workout ${w.date} "${w.name}": ${[...tops.entries()].map(([name, top]) => `${name} ${top.sets} sets, top ${top.kg} kg x ${top.reps}`).join("; ")}.`);
+    }
+    for (const c of [...state.cardio].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5)) {
+      lines.push(`Cardio ${c.date}: ${c.type} ${c.minutes} min${c.distance_km ? `, ${c.distance_km} km` : ""}.`);
+    }
+    if (state.routines.length) lines.push(`Plans: ${state.routines.map((p) => `${p.name} (${p.exercises.map((e) => `${e.name} ${e.sets}x${e.reps}`).join(", ")})`).join("; ")}.`);
+    const habits = state.habits.filter((habit) => !habit.archived);
+    if (habits.length) {
+      const week = Array.from({ length: 7 }, (_, i) => fullDay(state.days[fromUtc(toUtc(today) - i * DAY_MS)]));
+      lines.push(`Habits (done in last 7 days): ${habits.map((habit) => `${habit.name} ${week.filter((log) => log.habits_done.includes(habit.id)).length}/7`).join(", ")}.`);
+    }
+    const latestMeasure = [...state.measurements].sort((a, b) => b.date.localeCompare(a.date))[0];
+    if (latestMeasure) lines.push(`Latest measurements (${latestMeasure.date}): ${MEASURE_KEYS.filter((key) => latestMeasure[key] != null).map((key) => `${key} ${latestMeasure[key]}`).join(", ")}.`);
+    const todayNote = fullDay(state.days[today]).note;
+    if (todayNote) lines.push(`Today's note: ${todayNote}`);
+    return lines.join("\n");
+  },
 
   // ---------- weekly summary ----------
 

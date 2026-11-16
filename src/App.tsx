@@ -52,6 +52,10 @@ import { suggestIncrease } from "./training-logic";
 import { CardioCard, CardioForm, HabitsCard, HabitsManager, SleepCard, SleepForm, StepsCard, cardioLabel } from "./Health";
 import { BarcodeScanner, lookupBarcode } from "./Barcode";
 import { foodFromDb, loadFoodDb, searchFoodDb } from "./foodDb";
+import { SmartLog } from "./SmartLog";
+import type { SmartLogEntry } from "./SmartLog";
+import { AiSettings, CoachChat } from "./Coach";
+import { hasApiKey } from "./ai";
 import type { DbFood } from "./foodDb";
 import { fromKg, setPrefs, toKg, usePrefs } from "./prefs";
 import { currentPrefs } from "./prefs";
@@ -60,7 +64,7 @@ import type { ThemePref, Unit } from "./prefs";
 import type { BackupStatus, Cardio, DashboardData, Routine, WeekSummary, DayLog, EnergyEstimate, Fast, FoodSource, HabitStatus, Profile, Food, Meal, Serving, Targets, Workout } from "./types";
 
 type Page = "dashboard" | "foods" | "workouts" | "progress" | "settings";
-type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | "recipe" | "routine" | null;
+type Modal = "food" | "meal" | "editMeal" | "workout" | "targets" | "sleep" | "habits" | "cardio" | "recipe" | "routine" | "coach" | null;
 type WorkoutBody = { name: string; date: string; sets: { exercise_name: string; set_number: number; reps: number; weight_kg: number }[] };
 
 const BACKUP_REMIND_DAYS = 7;
@@ -148,6 +152,10 @@ export default function App() {
   const [editingCardio, setEditingCardio] = useState<Cardio | null>(null);
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [weekCard, setWeekCard] = useState<WeekSummary | null>(null);
+  const [aiReady, setAiReady] = useState(hasApiKey());
+  const [mealTab, setMealTab] = useState<"type" | "pick">(() => {
+    try { return localStorage.getItem("meal-tab") === "pick" ? "pick" : "type"; } catch { return "type"; }
+  });
   const [editingRoutine, setEditingRoutine] = useState<Routine | null>(null);
   /** Target reps per exercise (lowercased) when a workout was started from a plan. */
   const [planTargets, setPlanTargets] = useState<Record<string, number>>({});
@@ -270,6 +278,43 @@ export default function App() {
     openModal("recipe");
   }
 
+  /** Logs reviewed quick-log lines: adds any database/AI foods to the library first, then the meals. */
+  function saveSmartLog(entries: SmartLogEntry[], mealType: string) {
+    void runAction(async () => {
+      const library = await api.foods();
+      const byName = (name: string) => library.find((food) => food.name.toLowerCase() === name.toLowerCase());
+      for (const { choice, grams } of entries) {
+        let foodId: number;
+        if (choice.kind === "library") foodId = choice.food.id;
+        else if (choice.kind === "db") {
+          const food = byName(choice.item.name) ?? (await api.createFood(foodFromDb(choice.item)));
+          if (!library.includes(food)) library.push(food);
+          foodId = food.id;
+        } else {
+          // AI estimate: store per 100 g with a "1 portion" serving; an earlier AI food of the same name is refreshed.
+          const per100 = (value: number) => Math.round((value / choice.grams) * 1000) / 10;
+          const body = {
+            name: choice.name.slice(0, 120), brand: null, preparation: "unspecified" as const,
+            calories_per_100g: per100(choice.kcal), protein_g_per_100g: per100(choice.protein), carbohydrates_g_per_100g: per100(choice.carbs),
+            fat_g_per_100g: per100(choice.fat), fiber_g_per_100g: per100(choice.fiber),
+            servings: [{ label: "1 portion", grams: Math.round(choice.grams) }],
+            notes: `AI estimate (Claude Haiku 5.5)${choice.note ? `: ${choice.note}` : ""}`.slice(0, 500),
+          };
+          const existing = byName(choice.name);
+          const food = existing && existing.source === "ai" ? await api.updateFood(existing.id, body) : existing ?? (await api.createFood({ ...body, source: "ai" }));
+          if (!existing) library.push(food);
+          foodId = food.id;
+        }
+        await api.createMeal({ food_id: foodId, date: selectedDate, meal_type: mealType, portion_g: grams });
+      }
+    }, `Logged ${entries.length} item${entries.length === 1 ? "" : "s"}.`);
+  }
+
+  function openAiSetup() {
+    closeModal();
+    setPage("settings");
+  }
+
   function openRoutineEditor(routine: Routine | null = null) {
     setEditingRoutine(routine);
     openModal("routine");
@@ -359,6 +404,9 @@ export default function App() {
               <div className="hidden items-center gap-2 rounded-full border border-line bg-panel px-3 py-2 text-xs text-muted sm:flex">
                 <CalendarDays size={13} className="text-lime" /> {dateLabel(selectedDate)}
               </div>
+              <button onClick={() => openModal("coach")} className="button-secondary !min-h-10 !px-3" aria-label="AI coach">
+                <Sparkles size={16} className="text-amber-300" /><span className="hidden sm:inline">Coach</span>
+              </button>
               <button onClick={() => openWorkoutEditor()} className="button-secondary !min-h-10 !px-3 sm:hidden" aria-label="Log a workout">
                 <Dumbbell size={16} />
               </button>
@@ -447,6 +495,7 @@ export default function App() {
                 backup={backup}
                 onBackup={() => void runBackup()}
                 onImport={(backup) => runAction(() => api.importData(backup), "Backup restored.")}
+                onAiChanged={setAiReady}
               />
             )}
         </main>
@@ -490,6 +539,14 @@ export default function App() {
       )}
       {modal === "meal" && (
         <ModalShell title="Log a meal" eyebrow={dayLabel.toUpperCase()} onClose={closeModal}>
+          <div className="mb-4 flex rounded-xl border border-line bg-night p-1">
+            {([["type", "Type it"], ["pick", "Pick a food"]] as const).map(([key, label]) => (
+              <button key={key} onClick={() => { setMealTab(key); try { localStorage.setItem("meal-tab", key); } catch { /* not remembered */ } }} className={`flex-1 rounded-lg py-2 text-xs font-medium ${mealTab === key ? "bg-lime text-night" : "text-muted"}`}>{label}</button>
+            ))}
+          </div>
+          {mealTab === "type" ? (
+            <SmartLog foods={foods} aiReady={aiReady} busy={busy} error={error} defaultMealType={defaultMealType()} dayLabel={dayLabel} onSave={saveSmartLog} onSetUpAi={openAiSetup} />
+          ) : (
           <MealForm
             foods={foods}
             recentFoodIds={recentFoodIds}
@@ -510,6 +567,12 @@ export default function App() {
             }}
             onSubmit={(body) => runAction(() => api.createMeal(body), `Meal added to ${dayLabel.toLowerCase() === "today" ? "today's" : `${dayLabel}'s`} log.`)}
           />
+          )}
+        </ModalShell>
+      )}
+      {modal === "coach" && (
+        <ModalShell title="AI coach" eyebrow="ASK ABOUT YOUR DATA" onClose={closeModal}>
+          <CoachChat aiReady={aiReady} onSetUp={openAiSetup} />
         </ModalShell>
       )}
       {modal === "editMeal" && editingMeal && (
@@ -1068,7 +1131,7 @@ function FoodLibrary({ foods, onAdd, onScan, onRecipe, onEdit, onDelete }: { foo
                   <span><b className="font-medium text-white">{formatNumber(food.fiber_g_per_100g)}g</b> fiber</span>
                 </div>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>{food.source === "open-food-facts" ? "From Open Food Facts · check against the label" : food.source === "recipe" ? "Recipe · from your ingredients" : food.source === "usda" ? "From the USDA food database" : "Manually entered · not independently verified"}</span></div>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] text-muted"><span className="rounded-full bg-panel-raised px-2 py-1 capitalize">{food.preparation}</span>{food.servings.map((serving) => <span key={serving.label} className="rounded-full bg-lime/10 px-2 py-1 text-lime">{serving.label} · {formatNumber(serving.grams)} g</span>)}<span>{food.source === "open-food-facts" ? "From Open Food Facts · check against the label" : food.source === "recipe" ? "Recipe · from your ingredients" : food.source === "usda" ? "From the USDA food database" : food.source === "ai" ? "AI estimate · check it" : "Manually entered · not independently verified"}</span></div>
               {food.notes && <p className="mt-2 text-[10px] leading-4 text-muted">{food.notes}</p>}
             </article>
             </SwipeToDelete>
@@ -1758,7 +1821,7 @@ function WorkoutCard({ workout, onEdit, onRepeat, onDelete }: { workout: Workout
   );
 }
 
-function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { targets: Targets; onEditTargets: () => void; backup: BackupStatus; onBackup: () => void; onImport: (backup: unknown) => void }) {
+function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport, onAiChanged }: { targets: Targets; onEditTargets: () => void; backup: BackupStatus; onBackup: () => void; onImport: (backup: unknown) => void; onAiChanged: (ready: boolean) => void }) {
   const age = backup.last_backup_at === null ? null : daysSince(backup.last_backup_at);
   const lastBackup = age === null ? "Never" : age === 0 ? "Today" : age === 1 ? "Yesterday" : `${age} days ago`;
   const prefs = usePrefs();
@@ -1798,6 +1861,7 @@ function SettingsPage({ targets, onEditTargets, backup, onBackup, onImport }: { 
         <SettingToggle label="Appearance" value={prefs.theme} options={[["system", "Auto"], ["dark", "Dark"], ["light", "Light"]]} onChange={(theme: ThemePref) => setPrefs({ theme })} />
         <div className="mt-2 flex items-center justify-between rounded-xl bg-night px-3.5 py-3"><span className="text-xs text-muted">App version</span><span className="text-[11px] tabular-nums text-zinc-300">{__APP_VERSION__}</span></div>
       </section>
+      <AiSettings onChanged={onAiChanged} />
       <section className="mt-4 rounded-3xl border border-line bg-panel p-4 sm:p-6">
         <div className="flex items-center gap-2"><ShieldCheck size={16} className="text-lime" /><h3 className="font-semibold">Your data</h3></div>
         <p className="mt-2 max-w-xl text-xs leading-5 text-muted">Everything is stored on this device only. There is no account, cloud sync, or third-party nutrition service. Back up regularly: tap Back up, then choose <b className="font-medium text-zinc-300">Save to Files</b> (iCloud Drive). Deleting the app from your Home Screen deletes its data.</p>

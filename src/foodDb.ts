@@ -55,6 +55,7 @@ const SYNONYMS: Record<string, string> = {
   baingan: "eggplant", capsicum: "peppers", methi: "fenugreek", ghee: "butter oil", atta: "wheat flour whole-grain", maida: "wheat flour white",
   roti: "chapati", phulka: "chapati", chapathi: "chapati", mutton: "lamb", prawn: "shrimp", prawns: "shrimp",
   groundnut: "peanuts", peanut: "peanuts", moong: "mung", masoor: "lentils", toor: "pigeon peas", arhar: "pigeon peas",
+  chai: "tea brewed", tea: "tea brewed", coffee: "coffee brewed", anda: "egg", murgi: "chicken", seb: "apple", kela: "banana",
   jowar: "sorghum", bajra: "millet", ragi: "millet", sooji: "semolina", rava: "semolina", besan: "chickpea flour", oats: "oats",
 };
 
@@ -74,9 +75,20 @@ const EVERYDAY = [
 
 const words = (text: string) => text.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").split(/\s+/).filter(Boolean);
 
+/** Words to look for in your own food names: the everyday word plus the first synonym word ("chai" -> "tea"). */
+export function libraryWords(query: string): { plain: string[]; mapped: string[] } {
+  const plain = words(query).map((word) => word.replace(/s$/, ""));
+  return { plain, mapped: words(query).map((word) => (SYNONYMS[word] ? words(SYNONYMS[word])[0] : word.replace(/s$/, ""))) };
+}
+
+/** Search words for a query: lowercased, synonyms applied ("dal" -> "lentils"), simple plurals trimmed. */
+export function queryTerms(query: string): string[] {
+  return words(query).flatMap((word) => words(SYNONYMS[word] ?? word.replace(/s$/, "")));
+}
+
 /** Foods whose name contains every search word (after synonyms), best matches first. */
 export function searchFoodDb(foods: DbFood[], query: string, limit = 8): DbFood[] {
-  const terms = words(query).flatMap((word) => words(SYNONYMS[word] ?? word.replace(/s$/, "")));
+  const terms = queryTerms(query);
   if (!terms.length) return [];
   const asked = (word: string) => terms.some((term) => term.startsWith(word.slice(0, 5)));
   // Search terms are letters/digits/hyphens only (see `words`), so they're safe inside a RegExp.
