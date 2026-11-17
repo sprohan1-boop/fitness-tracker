@@ -48,21 +48,34 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
   const photoInput = useRef<HTMLInputElement>(null);
 
   // The database loads in the background; matching works with your own foods meanwhile.
-  useEffect(() => { void loadFoodDb().then(setDb).catch(() => setDb([])); }, []);
-  // The text whose unknown items the AI has already estimated (those lines are then hidden).
-  const [aiCoveredText, setAiCoveredText] = useState<string | null>(null);
+  // If it can't download (a weak connection), it retries a few times before giving up.
+  useEffect(() => {
+    let live = true;
+    const attempt = (tries: number) => {
+      loadFoodDb().then((foodsDb) => { if (live) setDb(foodsDb); }).catch(() => {
+        if (!live) return;
+        if (tries < 5) window.setTimeout(() => attempt(tries + 1), 3000);
+        else setDb([]);
+      });
+    };
+    attempt(0);
+    return () => { live = false; };
+  }, []);
+  // Typed lines the AI has replaced, for the text they came from (those lines are then hidden).
+  const [aiCovered, setAiCovered] = useState<{ text: string; lines: string[] } | null>(null);
   // Re-read the text a moment after typing stops. AI lines (from text or photos) are kept.
   useEffect(() => {
     const id = window.setTimeout(() => {
       setLines((current) => {
         const parsed = text.trim() ? quickLog(text, foods, db) : [];
         // Photo estimates stay; estimates made from the text only while that text is unchanged.
-        const ai = current.filter((line) => line.choice?.kind === "ai" && (line.text === PHOTO_LINE || aiCoveredText === text));
-        return [...(aiCoveredText === text ? parsed.filter((line) => line.choice) : parsed), ...ai];
+        const covered = aiCovered?.text === text ? aiCovered.lines : null;
+        const ai = current.filter((line) => line.choice?.kind === "ai" && (line.text === PHOTO_LINE || covered !== null));
+        return [...(covered ? parsed.filter((line) => !covered.includes(line.text)) : parsed), ...ai];
       });
     }, 300);
     return () => window.clearTimeout(id);
-  }, [text, foods, db, aiCoveredText]);
+  }, [text, foods, db, aiCovered]);
 
   const unmatched = lines.filter((line) => !line.choice);
   const ready = lines.filter((line) => line.choice && Number(line.grams) > 0);
@@ -83,24 +96,32 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
     setOpenPicker(null);
   }
 
-  async function estimateUnmatched() {
+  // Typed lines (not AI estimates) that the AI could estimate instead.
+  const typedLines = lines.filter((line) => line.choice?.kind !== "ai" && line.text !== PHOTO_LINE);
+
+  /** Replaces the given typed lines with AI estimates (default: the ones the free matcher couldn't place). */
+  async function estimateWithAi(targets: QuickLine[] = unmatched) {
+    if (!targets.length) return;
     setAiBusy("text");
     setAiError("");
+    setOpenPicker(null);
     try {
       // Give the AI the closest database/library foods as anchors (e.g. cooked chicken for "chicken curry").
       const references: AiReference[] = [];
-      for (const line of unmatched) {
-        for (const alternative of line.alternatives.slice(0, 2)) {
+      for (const line of targets) {
+        for (const alternative of [line.choice, ...line.alternatives].filter((choice): choice is Choice => choice !== null && choice.kind !== "ai").slice(0, 2)) {
           const n = nutritionFor(alternative, 100);
           if (!references.some((r) => r.name === choiceName(alternative))) {
             references.push({ name: choiceName(alternative), kcal: n.kcal, protein: Math.round(n.protein * 10) / 10, carbs: Math.round(n.carbs * 10) / 10, fat: Math.round(n.fat * 10) / 10 });
           }
         }
       }
-      const items = await estimateMealFromText(unmatched.map((line) => line.text).join(", "), references.slice(0, 6));
-      // Replace the lines the free matcher couldn't place with the AI's estimates.
-      setAiCoveredText(text);
-      setLines((current) => [...current.filter((line) => line.choice), ...items.map((item) => aiLine(item, item.name))]);
+      // Amounts you set count: "omelette (122 g)" rather than just "2 egg omelette".
+      const described = targets.map((line) => (line.choice && Number(line.grams) > 0 && !/\d/.test(line.text) ? `${line.text} (about ${line.grams} g)` : line.text));
+      const items = await estimateMealFromText(described.join(", "), references.slice(0, 6));
+      const replaced = targets.map((line) => line.text);
+      setAiCovered((current) => ({ text, lines: [...(current?.text === text ? current.lines : []), ...replaced] }));
+      setLines((current) => [...current.filter((line) => !targets.includes(line)), ...items.map((item) => aiLine(item, item.name))]);
     } catch (cause) {
       setAiError(await friendlyError(cause));
     } finally {
@@ -155,12 +176,12 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
           </div>
           {line.choice ? (
             <>
-              <button type="button" onClick={() => setOpenPicker(openPicker === index ? null : index)} disabled={!line.alternatives.length} className="mt-1 flex w-full items-start justify-between gap-2 text-left">
+              <button type="button" onClick={() => setOpenPicker(openPicker === index ? null : index)} disabled={!line.alternatives.length && !(aiReady && line.choice.kind !== "ai")} className="mt-1 flex w-full items-start justify-between gap-2 text-left">
                 <span className="min-w-0">
                   <span className="line-clamp-2 text-sm font-medium leading-5">{choiceName(line.choice)}</span>
                   <span className={`text-[10px] ${sourceLabel(line.choice).tone}`}>{sourceLabel(line.choice).text}</span>
                 </span>
-                {line.alternatives.length > 1 && <ChevronDown size={16} className="mt-0.5 shrink-0 text-muted" />}
+                {(line.alternatives.length > 1 || (aiReady && line.choice.kind !== "ai")) && <ChevronDown size={16} className="mt-0.5 shrink-0 text-muted" />}
               </button>
               {openPicker === index && (
                 <div className="mt-2 space-y-1">
@@ -169,6 +190,11 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
                       {choiceName(alternative)} <span className={`text-[10px] ${sourceLabel(alternative).tone}`}>· {sourceLabel(alternative).text}</span>
                     </button>
                   ))}
+                  {aiReady && line.choice.kind !== "ai" && (
+                    <button type="button" disabled={aiBusy !== null} onClick={() => void estimateWithAi([line])} className="flex w-full items-center gap-1.5 rounded-lg border border-amber-300/40 px-2.5 py-2 text-left text-[12px] leading-4 text-amber-300">
+                      <Sparkles size={13} /> Estimate this one with AI instead
+                    </button>
+                  )}
                 </div>
               )}
               <div className="mt-2">
@@ -183,7 +209,7 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
             </>
           ) : (
             <>
-              <p className="mt-1 text-xs text-amber-300">{line.partial ? `No exact match for “${line.partial}” in your foods or the database.` : "Not found in your foods or the database."}</p>
+              <p className="mt-1 text-xs text-amber-300">{db === null ? "Loading the food database…" : line.partial ? `No exact match for “${line.partial}” in your foods or the database.` : "Not found in your foods or the database."}</p>
               {line.alternatives.length > 0 && (
                 <div className="mt-2 space-y-1">
                   <p className="text-[10px] text-muted">Closest foods (pick one only if it's close enough):</p>
@@ -199,12 +225,20 @@ export function SmartLog({ foods, aiReady, busy, error, defaultMealType, dayLabe
         </div>
       ))}
 
+      {aiReady && typedLines.length > 0 && (
+        <button type="button" disabled={aiBusy !== null} onClick={() => void estimateWithAi(unmatched.length ? unmatched : typedLines)} className="button-secondary w-full">
+          {aiBusy === "text" ? <><Loader2 size={15} className="animate-spin" /> Estimating…</>
+            : unmatched.length ? <><Sparkles size={15} className="text-amber-300" /> Estimate {unmatched.length === 1 ? "the unknown item" : `these ${unmatched.length} unknown items`} with AI</>
+            : <><Sparkles size={15} className="text-amber-300" /> Use AI for {typedLines.length === 1 ? "this" : "the whole meal"} instead</>}
+        </button>
+      )}
+      {unmatched.length > 0 && aiReady && typedLines.length > unmatched.length && (
+        <button type="button" disabled={aiBusy !== null} onClick={() => void estimateWithAi(typedLines)} className="w-full text-center text-[11px] text-muted">
+          or use AI for the whole meal ({typedLines.length} items)
+        </button>
+      )}
       {unmatched.length > 0 && (
-        aiReady ? (
-          <button type="button" disabled={aiBusy !== null} onClick={() => void estimateUnmatched()} className="button-secondary w-full">
-            {aiBusy === "text" ? <><Loader2 size={15} className="animate-spin" /> Estimating…</> : <><Sparkles size={15} className="text-amber-300" /> Estimate {unmatched.length === 1 ? "it" : `these ${unmatched.length}`} with AI</>}
-          </button>
-        ) : (
+        aiReady ? null : (
           <p className="text-[11px] leading-5 text-muted">Remove unknown items, add them to your food library, or <button type="button" onClick={onSetUpAi} className="font-semibold text-amber-300">set up AI</button> to estimate them.</p>
         )
       )}

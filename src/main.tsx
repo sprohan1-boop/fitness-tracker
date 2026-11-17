@@ -39,8 +39,13 @@ if (viewport) {
     } else {
       root.removeProperty("--vv-height");
       root.removeProperty("--vv-top");
+      // iPhone scrolls the page up to make room for the keyboard and doesn't always scroll it back,
+      // leaving a strip at the bottom. The app never scrolls the page itself, so reset it.
+      if (window.scrollY !== 0 || document.documentElement.scrollTop !== 0) window.scrollTo(0, 0);
     }
   };
+  // Also when a text box loses focus (the keyboard is closing).
+  document.addEventListener("focusout", () => window.setTimeout(syncViewport, 100));
   syncViewport();
   viewport.addEventListener("resize", syncViewport);
   viewport.addEventListener("scroll", syncViewport);

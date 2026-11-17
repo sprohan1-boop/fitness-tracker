@@ -51,12 +51,27 @@ const UNIT_MATCH: Record<string, RegExp> = {
   scoop: /\bscoop/, plate: /\bplate/, handful: /\bhandful/,
 };
 
-/** Splits on commas, semicolons, new lines, "+", "&", "and", "plus". */
+/**
+ * Splits on commas, semicolons, new lines, "+", "&", "and", "plus", "aur", and on "with" / "along
+ * with" / "extra", since what follows is food too ("omelette with chicken", "chai with sugar").
+ * Not "with bone" / "with skin" (about the weight); "without" and "no" are handled when matching.
+ */
 export function splitItems(input: string): string[] {
-  return input
-    .split(/[,;\n+&]|\band\b|\bplus\b|\baur\b/i)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 1);
+  return splitParts(input).map((part) => part.text);
+}
+
+/** Like splitItems, also saying which items were add-ons ("… with X", "extra X"): their amount is a guess. */
+function splitParts(input: string): { text: string; addOn: boolean }[] {
+  const parts: { text: string; addOn: boolean }[] = [];
+  for (const piece of input.split(/[,;\n+&]|\band\b|\bplus\b|\baur\b/i)) {
+    piece.split(/\b((?:along )?with|extra)\b(?!\s+(?:the\s+)?(?:bones?|skin)\b)/i).forEach((part, index) => {
+      // split() with a capture group puts the separators at odd positions: what follows one is an add-on.
+      if (index % 2 === 1) return;
+      const text = part.trim();
+      if (text.length > 1) parts.push({ text, addOn: index > 0 });
+    });
+  }
+  return parts;
 }
 
 function parseNumber(token: string): number | null {
@@ -216,7 +231,7 @@ function subPhrases(words: string[]): string[][] {
  * add-ons ("with sugar") may be left out, and the line then says what was left out.
  */
 export function quickLog(input: string, library: Food[], db: DbFood[] | null): QuickLine[] {
-  return splitItems(input).map((text) => {
+  return splitParts(input).map(({ text, addOn }) => {
     const { qty, unit, foodText, withBone, counted } = parseItem(text);
     const { required, optional } = classify(foodText);
     // Matches for some words, and whether the best one IS that food (see rankFoodDb).
@@ -281,7 +296,8 @@ export function quickLog(input: string, library: Food[], db: DbFood[] | null): Q
     return {
       text, qty, unit, choice, alternatives,
       grams: grams === null ? "" : String(grams),
-      estimatedAmount: amount.estimated || withBone,
+      // An add-on with no amount ("… with chicken") gets a usual serving, but flagged for checking.
+      estimatedAmount: amount.estimated || withBone || (addOn && choice !== null && !counted && !unit),
       note: notes.join(" "),
       partial: !exact && alternatives.length ? (left(required).join(" ") || required.join(" ")) : null,
     };

@@ -196,6 +196,15 @@ describe("amounts", () => {
     expect(line("black coffee").note).toMatch(/without “black”/);
     expect(line("tea without sugar").note).toMatch(/sugar/);
   });
+  test("\"with\" adds a food; \"with bone\" and \"without\" don't", () => {
+    const names = (text: string) => quickLog(text, [], db).map((result) => result.text);
+    expect(names("2 egg omelette with shredded chicken")).toEqual(["2 egg omelette", "shredded chicken"]);
+    expect(quickLog("2 egg omelette with shredded chicken", [], db)[1].choice).not.toBeNull();
+    expect(names("chai with sugar")).toEqual(["chai", "sugar"]);
+    expect(names("chicken breast 200g with bone")).toHaveLength(1);
+    expect(names("tea without sugar")).toHaveLength(1);
+    expect(names("roti along with dal")).toEqual(["roti", "dal"]);
+  });
   test("several foods in one line", () => {
     expect(quickLog("2 roti, 1 bowl dal and black coffee", [], db).map((result) => result.choice && choiceName(result.choice))).toEqual([
       expect.stringMatching(/roti/), expect.stringMatching(/^Lentils/), expect.stringMatching(/coffee/),

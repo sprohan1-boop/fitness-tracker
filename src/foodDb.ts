@@ -187,6 +187,7 @@ const EVERYDAY = [
 export const DESCRIBING = new Set([
   "black", "green", "white", "brown", "red", "yellow", "unsweetened", "salted", "unsalted", "spicy", "filter", "instant", "strong",
   "cooked", "boiled", "steamed", "roasted", "grilled", "baked", "raw", "ripe", "indian", "desi", "organic", "chopped", "sliced",
+  "shredded", "minced", "diced", "grated", "mashed", "pulled",
 ]);
 
 // Words in a USDA name that don't make it a different food ("Chicken, …, meat only, cooked").
